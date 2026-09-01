@@ -1,4 +1,4 @@
-"""
+""
 سكربت "تشغيل مرة واحدة" - مخصص للعمل مع GitHub Actions
 (بدل main.py اللي فيه حلقة لا نهائية، مش مناسبة لبيئة زي GitHub Actions
 اللي بتشغل الكود، تنفذه مرة، وتقفله).
@@ -13,6 +13,8 @@ import telegram_notifier as notifier
 
 def main():
     Config.validate()
+
+    notifier.send_text("اختبار: الـ Agent شغال ومتصل بتلغرام بنجاح")
 
     try:
         signal = analyze_market()
