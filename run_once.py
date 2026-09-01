@@ -6,8 +6,6 @@ import telegram_notifier as notifier
 def main():
     Config.validate()
 
-    notifier.send_text("Test: Agent is connected to Telegram successfully")
-
     try:
         signal = analyze_market()
     except Exception as e:
