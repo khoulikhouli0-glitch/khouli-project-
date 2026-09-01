@@ -1,15 +1,3 @@
-""
-Signal engine: runs the full top-down SMC analysis and returns a trade
-suggestion with a reason, or None if conditions are not met yet.
-
-Sequence:
-1) H4  -> overall bias (BOS/CHoCH)
-2) H1  -> Premium/Discount zone
-3) M5  -> Liquidity Sweep + confirming CHoCH
-4) M1  -> enter immediately after structure confirmation, using the
-   nearest Order Block/FVG for the stop if available, otherwise a
-   fallback stop distance based on recent average range.
-"""
 from datetime import datetime
 import deriv_connector as dc
 import smc_analysis as smc
@@ -101,4 +89,4 @@ def build_reason(bias, pd_zone, sweep, ltf_structure, zone_type) -> str:
         f"Price inside {zone_label} zone on {Config.MTF_ZONE}\n"
         f"Swept {sweep_label} then {ltf_structure['last_event']} on {Config.LTF_CONFIRM}\n"
         f"Immediate entry after structure confirmation, stop based on {zone_type} on {Config.ENTRY_TF}"
-    )
+   )
