@@ -8,11 +8,27 @@ from config import Config
 
 CONFIRM_TF = "M15"
 TRIGGER_TF = "M5"
+LOOKBACK_CANDLES = 30
 
 
 def _get_bias(df) -> str:
     structure = smc.detect_structure(df)
     return structure["trend"]
+
+
+def _find_zone_touch(df, zones_list, lookback):
+    n = len(df)
+    start = max(1, n - lookback)
+    for i in range(n - 1, start - 1, -1):
+        candle = df.iloc[i]
+        zone = zones.price_in_any_zone(candle["close"], zones_list)
+        if zone is None:
+            zone = zones.price_in_any_zone(candle["low"], zones_list)
+        if zone is None:
+            zone = zones.price_in_any_zone(candle["high"], zones_list)
+        if zone is not None:
+            return zone, i
+    return None, None
 
 
 def analyze_market(debug: bool = False) -> dict | None:
@@ -43,34 +59,39 @@ def analyze_market(debug: bool = False) -> dict | None:
     confluence_zones = zones.find_confluence(daily_zones, h4_zones, "Daily", "H4")
     confluence_zones += zones.find_confluence(daily_zones, h1_zones, "Daily", "H1")
     confluence_zones += zones.find_confluence(h4_zones, h1_zones, "H4", "H1")
-    all_zones = confluence_zones + daily_zones + h4_zones + h1_zones
+    all_zones_ordered = [
+        ("Confluence", confluence_zones),
+        ("Daily", daily_zones),
+        ("H4", h4_zones),
+        ("H1", h1_zones),
+    ]
 
-    if not all_zones:
-        log("STOP: no zones of interest found on Daily or H4")
+    if not (confluence_zones or daily_zones or h4_zones or h1_zones):
+        log("STOP: no zones of interest found on Daily, H4 or H1")
         return None
-
-    m1_df = dc.get_candles("M1", count=2)
-    ref_price = float(m1_df["close"].iloc[-1])
-
-    matched_zone = zones.price_in_any_zone(ref_price, confluence_zones)
-    source_tf = "Confluence"
-    if matched_zone is None:
-        matched_zone = zones.price_in_any_zone(ref_price, daily_zones)
-        source_tf = "Daily"
-    if matched_zone is None:
-        matched_zone = zones.price_in_any_zone(ref_price, h4_zones)
-        source_tf = "H4"
-    if matched_zone is None:
-        matched_zone = zones.price_in_any_zone(ref_price, h1_zones)
-        source_tf = "H1"
-
-    if matched_zone is None:
-        log("STOP: price is not currently inside any zone of interest")
-        return None
-
-    log(f"Price is inside zone: {matched_zone} (source_tf={source_tf})")
 
     ltf_df = dc.get_candles(TRIGGER_TF, count=100)
+
+    matched_zone = None
+    source_tf = None
+    touch_index = None
+    for label, zlist in all_zones_ordered:
+        if not zlist:
+            continue
+        zone, idx = _find_zone_touch(ltf_df, zlist, LOOKBACK_CANDLES)
+        if zone is not None:
+            matched_zone = zone
+            source_tf = label
+            touch_index = idx
+            break
+
+    if matched_zone is None:
+        log(f"STOP: price has not touched any zone of interest in the last {LOOKBACK_CANDLES} candles")
+        return None
+
+    ref_price = float(ltf_df["close"].iloc[-1])
+    log(f"Zone touched at candle index {touch_index}: {matched_zone} (source_tf={source_tf})")
+
     sweep = smc.detect_liquidity_sweep(ltf_df)
     ltf_structure = smc.detect_structure(ltf_df)
 
@@ -79,7 +100,7 @@ def analyze_market(debug: bool = False) -> dict | None:
         or ltf_structure["last_event"] in ("BOS", "CHoCH")
     )
     if not trigger_present:
-        log("STOP: no trigger (sweep/structure change) yet at the zone")
+        log("STOP: no trigger (sweep/structure change) yet near the zone")
         return None
 
     confirm_df = dc.get_candles(CONFIRM_TF, count=60)
