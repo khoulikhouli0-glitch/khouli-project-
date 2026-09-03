@@ -10,25 +10,11 @@ TOUCH_LOOKBACK = 40
 INTERMEDIATE_WINDOW_CANDLES = 6
 SWING_LEFT_RIGHT = 3
 MIN_SWING_RR = 1.5
-EQUAL_LEVEL_TOLERANCE_PCT = 0.0006
-MAGNET_DISTANCE_PCT = 0.0015
-CONSOLIDATION_LOOKBACK = 6
-CONSOLIDATION_MAX_RANGE_PCT = 0.002
-
-LONDON_KILLZONE = (7, 10)
-NY_KILLZONE = (12, 15)
 
 
 def _get_bias(df) -> str:
     structure = smc.detect_structure(df)
     return structure["trend"]
-
-
-def _in_killzone(candle_time) -> bool:
-    hour = candle_time.hour
-    in_london = LONDON_KILLZONE[0] <= hour < LONDON_KILLZONE[1]
-    in_ny = NY_KILLZONE[0] <= hour < NY_KILLZONE[1]
-    return in_london or in_ny
 
 
 def _find_intermediate_confirmation(df, zones_list, direction, lookback, max_wait):
@@ -68,58 +54,12 @@ def _find_intermediate_confirmation(df, zones_list, direction, lookback, max_wai
 
                 if struct_ok or sweep_ok:
                     confirm_type = "Structure Shift (BOS/CHoCH)" if struct_ok else "Liquidity Sweep"
-                    result = (zone, i, j, confirm_type, sweep_ok)
+                    result = (zone, i, j, confirm_type)
                     break
 
         in_zone = touched_now
 
     return result
-
-
-def _check_inducement(df, confirm_idx, sweep_ok):
-    if not sweep_ok:
-        return True
-
-    start = max(0, confirm_idx - CONSOLIDATION_LOOKBACK)
-    pre_window = df.iloc[start:confirm_idx]
-    if len(pre_window) < 3:
-        return False
-
-    price_ref = float(df.iloc[confirm_idx]["close"])
-    range_size = float(pre_window["high"].max() - pre_window["low"].min())
-    range_pct = range_size / price_ref if price_ref > 0 else 1
-
-    return range_pct <= CONSOLIDATION_MAX_RANGE_PCT
-
-
-def _check_liquidity_magnet(df, direction, entry_price, up_to_index):
-    sub_df = df.iloc[: up_to_index + 1]
-    if len(sub_df) < (SWING_LEFT_RIGHT * 2 + 3):
-        return True
-
-    swings = smc.find_swing_points(sub_df, left=SWING_LEFT_RIGHT, right=SWING_LEFT_RIGHT)
-    magnet_distance = entry_price * MAGNET_DISTANCE_PCT
-
-    if direction == "bullish":
-        highs = swings[swings["is_swing_high"]]["high"]
-        nearby = highs[(highs > entry_price) & (highs <= entry_price + magnet_distance)]
-        if len(nearby) < 2:
-            return True
-        levels = sorted(nearby.tolist())
-        for a, b in zip(levels, levels[1:]):
-            if abs(a - b) <= entry_price * EQUAL_LEVEL_TOLERANCE_PCT:
-                return False
-        return True
-
-    lows = swings[swings["is_swing_low"]]["low"]
-    nearby = lows[(lows < entry_price) & (lows >= entry_price - magnet_distance)]
-    if len(nearby) < 2:
-        return True
-    levels = sorted(nearby.tolist())
-    for a, b in zip(levels, levels[1:]):
-        if abs(a - b) <= entry_price * EQUAL_LEVEL_TOLERANCE_PCT:
-            return False
-    return True
 
 
 def _find_structural_stop(df, direction, up_to_index):
@@ -283,18 +223,8 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
             log(f"{path['label']}: no fresh confirmed touch on {path['intermediate_label']}")
             continue
 
-        matched_zone, touch_idx, confirm_idx, intermediate_type, sweep_ok = found
+        matched_zone, touch_idx, confirm_idx, intermediate_type = found
         log(f"{path['label']}: touch+confirm on {path['intermediate_label']} ({intermediate_type})")
-
-        if path["scalp_style"]:
-            confirm_candle_time = path["intermediate_df"].iloc[confirm_idx]["time"]
-            if not _in_killzone(confirm_candle_time):
-                log(f"{path['label']}: skipped - confirmation outside London/NY killzone ({confirm_candle_time})")
-                continue
-
-            if not _check_inducement(path["intermediate_df"], confirm_idx, sweep_ok):
-                log(f"{path['label']}: skipped - sweep not preceded by clear consolidation (no inducement)")
-                continue
 
         entry_confirmation = confirm.get_confirmation(path["entry_df"], direction=direction_word, lookback=10)
         log(f"{path['label']}: entry confirmation on {path['entry_label']} = {entry_confirmation}")
@@ -303,11 +233,6 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
 
         direction = "BUY" if direction_word == "bullish" else "SELL"
         entry_price = float(path["entry_df"]["close"].iloc[-1])
-
-        if path["scalp_style"]:
-            if not _check_liquidity_magnet(path["intermediate_df"], direction_word, entry_price, confirm_idx):
-                log(f"{path['label']}: skipped - untaken equal highs/lows near entry (liquidity magnet)")
-                continue
 
         stop_source = "Zone edge"
         stop_loss = None
