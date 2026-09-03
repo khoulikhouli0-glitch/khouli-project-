@@ -181,7 +181,7 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
     if m15_bias in ("bullish", "bearish") and m5_df is not None and not h1_conflicts_m15:
         scalp_zones = zones.collect_zones(h1_df, direction=m15_bias)
         paths.append({
-            "label": "Scalp (H1)",
+            "label": "Scalp (H1 Zone / M15 Bias)",
             "bias": m15_bias,
             "zones_list": scalp_zones,
             "source_df": h1_df,
@@ -194,7 +194,7 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
             "target_multiplier": 1.5,
         })
     elif h1_conflicts_m15:
-        log(f"Scalp (H1): skipped - M15 bias ({m15_bias}) conflicts with H1 bias ({h1_bias})")
+        log(f"Scalp: skipped - M15 bias ({m15_bias}) conflicts with H1 bias ({h1_bias})")
 
     signals = []
 
@@ -311,7 +311,7 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
         })
 
     if not signals:
-        log("No trade opportunity found on any path (Swing-Daily, Swing-H4, Scalp-H1)")
+        log("No trade opportunity found on any path (Swing-Daily, Swing-H4, Scalp)")
 
     return signals
 
