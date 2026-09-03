@@ -9,6 +9,7 @@ from config import Config
 TOUCH_LOOKBACK = 40
 INTERMEDIATE_WINDOW_CANDLES = 6
 SWING_LEFT_RIGHT = 3
+MIN_SWING_RR = 1.5
 
 
 def _get_bias(df) -> str:
@@ -80,9 +81,26 @@ def _find_structural_stop(df, direction, up_to_index):
     return float(highs.iloc[-1])
 
 
+def _find_liquidity_target(source_df, direction, entry_price):
+    swings = smc.find_swing_points(source_df, left=SWING_LEFT_RIGHT, right=SWING_LEFT_RIGHT)
+
+    if direction == "bullish":
+        candidates = swings[swings["is_swing_high"]]["high"]
+        candidates = candidates[candidates > entry_price]
+        if candidates.empty:
+            return None
+        return float(candidates.min())
+
+    candidates = swings[swings["is_swing_low"]]["low"]
+    candidates = candidates[candidates < entry_price]
+    if candidates.empty:
+        return None
+    return float(candidates.max())
+
+
 def _build_reason(path_label, direction_word, matched_zone, intermediate_label,
                    intermediate_type, entry_label, entry_confirmation, confidence_label,
-                   stop_source):
+                   stop_source, target_source):
     return (
         f"Type: {path_label}\n"
         f"Bias: {direction_word}\n"
@@ -90,6 +108,7 @@ def _build_reason(path_label, direction_word, matched_zone, intermediate_label,
         f"Intermediate confirmation on {intermediate_label}: {intermediate_type}\n"
         f"Entry confirmation on {entry_label}: {entry_confirmation}\n"
         f"Stop basis: {stop_source}\n"
+        f"Target basis: {target_source}\n"
         f"Confidence: {confidence_label}"
     )
 
@@ -112,29 +131,37 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
         daily_direction = "SELL"
 
     paths = []
+
     if daily_bias in ("bullish", "bearish"):
+        daily_zones_dir = zones.collect_zones(daily_df, direction=daily_bias)
+        h4_zones_for_daily = zones.collect_zones(h4_df, direction=daily_bias)
+        confluence_daily = zones.find_confluence(daily_zones_dir, h4_zones_for_daily, "Daily", "H4")
         paths.append({
             "label": "Swing (Daily)",
             "bias": daily_bias,
+            "zones_list": confluence_daily,
             "source_df": daily_df,
             "intermediate_df": h4_df,
             "intermediate_label": "H4",
             "entry_df": m15_df,
             "entry_label": "M15",
-            "target_multiplier": 3.0,
-            "structural_stop": False,
+            "swing_style": True,
         })
+
     if h4_bias in ("bullish", "bearish"):
+        h4_zones_dir = zones.collect_zones(h4_df, direction=h4_bias)
+        h1_zones_for_h4 = zones.collect_zones(h1_df, direction=h4_bias)
+        confluence_h4 = zones.find_confluence(h4_zones_dir, h1_zones_for_h4, "H4", "H1")
         paths.append({
             "label": "Swing (H4)",
             "bias": h4_bias,
+            "zones_list": confluence_h4,
             "source_df": h4_df,
             "intermediate_df": h1_df,
             "intermediate_label": "H1",
             "entry_df": m15_df,
             "entry_label": "M15",
-            "target_multiplier": 2.0,
-            "structural_stop": False,
+            "swing_style": True,
         })
 
     h1_conflicts_m15 = (
@@ -143,16 +170,18 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
         and h1_bias != m15_bias
     )
     if m15_bias in ("bullish", "bearish") and m5_df is not None and not h1_conflicts_m15:
+        scalp_zones = zones.collect_zones(h1_df, direction=m15_bias)
         paths.append({
             "label": "Scalp (H1)",
             "bias": m15_bias,
+            "zones_list": scalp_zones,
             "source_df": h1_df,
             "intermediate_df": m15_df,
             "intermediate_label": "M15",
             "entry_df": m5_df,
             "entry_label": "M5",
+            "swing_style": False,
             "target_multiplier": 1.5,
-            "structural_stop": True,
         })
     elif h1_conflicts_m15:
         log(f"Scalp (H1): skipped - M15 bias ({m15_bias}) conflicts with H1 bias ({h1_bias})")
@@ -161,10 +190,17 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
 
     for path in paths:
         direction_word = path["bias"]
-        zones_list = zones.collect_zones(path["source_df"], direction=direction_word)
+        zones_list = path["zones_list"]
         if not zones_list:
-            log(f"{path['label']}: no zones of interest")
+            log(f"{path['label']}: no confluence/zones of interest")
             continue
+
+        if path["swing_style"]:
+            pd_zone = smc.get_premium_discount_zone(path["source_df"])
+            wanted_zone = "discount" if direction_word == "bullish" else "premium"
+            if pd_zone["zone"] != wanted_zone:
+                log(f"{path['label']}: skipped - price in {pd_zone['zone']} zone, need {wanted_zone}")
+                continue
 
         found = _find_intermediate_confirmation(
             path["intermediate_df"],
@@ -191,7 +227,7 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
         stop_source = "Zone edge"
         stop_loss = None
 
-        if path["structural_stop"]:
+        if not path["swing_style"]:
             structural_level = _find_structural_stop(
                 path["intermediate_df"], direction_word, confirm_idx
             )
@@ -209,18 +245,33 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
                 stop_loss = matched_zone["top"] * 1.0007
             stop_source = "Zone edge"
 
-        if direction == "BUY":
-            if entry_price <= stop_loss:
-                log(f"{path['label']}: STOP - buy stop already invalidated")
+        if direction == "BUY" and entry_price <= stop_loss:
+            log(f"{path['label']}: STOP - buy stop already invalidated")
+            continue
+        if direction == "SELL" and entry_price >= stop_loss:
+            log(f"{path['label']}: STOP - sell stop already invalidated")
+            continue
+
+        risk = abs(entry_price - stop_loss)
+
+        if path["swing_style"]:
+            liquidity_target = _find_liquidity_target(path["source_df"], direction_word, entry_price)
+            if liquidity_target is None:
+                log(f"{path['label']}: skipped - no liquidity target found")
                 continue
-            risk = entry_price - stop_loss
-            take_profit = entry_price + risk * path["target_multiplier"]
+            reward = abs(liquidity_target - entry_price)
+            rr = reward / risk if risk > 0 else 0
+            if rr < MIN_SWING_RR:
+                log(f"{path['label']}: skipped - R:R {round(rr, 2)} below minimum {MIN_SWING_RR}")
+                continue
+            take_profit = liquidity_target
+            target_source = "Nearest opposing liquidity (swing point)"
         else:
-            if entry_price >= stop_loss:
-                log(f"{path['label']}: STOP - sell stop already invalidated")
-                continue
-            risk = stop_loss - entry_price
-            take_profit = entry_price - risk * path["target_multiplier"]
+            if direction == "BUY":
+                take_profit = entry_price + risk * path["target_multiplier"]
+            else:
+                take_profit = entry_price - risk * path["target_multiplier"]
+            target_source = f"Fixed {path['target_multiplier']}x risk multiplier"
 
         if daily_direction is None or direction == daily_direction:
             confidence = "high"
@@ -233,7 +284,7 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
             path["label"], direction_word, matched_zone,
             path["intermediate_label"], intermediate_type,
             path["entry_label"], entry_confirmation, confidence_label,
-            stop_source,
+            stop_source, target_source,
         )
 
         signals.append({
