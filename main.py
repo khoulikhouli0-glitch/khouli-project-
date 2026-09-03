@@ -1,7 +1,5 @@
-"""
-نقطة التشغيل الرئيسية.
-يفحص السوق كل POLL_INTERVAL_SECONDS، ولو فيه إشارة جديدة يبعتها على تلغرام.
-"""
+# نقطة التشغيل الرئيسية
+# يفحص السوق كل POLL_INTERVAL_SECONDS، ولو فيه إشارات جديدة يبعتها على تلغرام
 import time
 import traceback
 from datetime import datetime, timedelta
@@ -11,28 +9,19 @@ import telegram_notifier as notifier
 from config import Config
 from signal_engine import analyze_market
 
-# لمنع تكرار نفس الإشارة كل شوية
 COOLDOWN_MINUTES = 15
-_last_signal_time = None
-_last_signal_direction = None
+_last_sent = {}
 
 
 def should_send(signal: dict) -> bool:
-    global _last_signal_time, _last_signal_direction
-
-    if signal is None:
-        return False
-
+    key = (signal["trade_label"], signal["direction"])
     now = datetime.now()
-    if (
-        _last_signal_time
-        and _last_signal_direction == signal["direction"]
-        and now - _last_signal_time < timedelta(minutes=COOLDOWN_MINUTES)
-    ):
+    last_time = _last_sent.get(key)
+
+    if last_time and now - last_time < timedelta(minutes=COOLDOWN_MINUTES):
         return False
 
-    _last_signal_time = now
-    _last_signal_direction = signal["direction"]
+    _last_sent[key] = now
     return True
 
 
@@ -52,10 +41,12 @@ def main():
     try:
         while True:
             try:
-                signal = analyze_market()
-                if should_send(signal):
-                    print(f"[Signal] {signal['direction']} @ {signal['entry']}")
-                    notifier.send_signal(signal)
+                signals = analyze_market()
+                to_send = [s for s in signals if should_send(s)]
+                if to_send:
+                    for s in to_send:
+                        print(f"[Signal] {s['trade_label']} {s['direction']} @ {s['entry']} ({s['confidence']})")
+                    notifier.send_signals(to_send)
                 else:
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] لا توجد فرصة حالياً...")
             except Exception as e:
