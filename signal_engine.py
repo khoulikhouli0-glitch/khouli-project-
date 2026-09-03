@@ -116,8 +116,14 @@ def analyze_market(debug: bool = False) -> dict | None:
 
     if direction == "BUY":
         stop_loss = matched_zone["bottom"] * 0.9993
+        if entry_price <= stop_loss:
+            log("STOP: price has already invalidated the buy zone (moved below it)")
+            return None
     else:
         stop_loss = matched_zone["top"] * 1.0007
+        if entry_price >= stop_loss:
+            log("STOP: price has already invalidated the sell zone (moved above it)")
+            return None
 
     if "Daily" in source_tf:
         target_multiplier = 3.0
@@ -167,4 +173,4 @@ def build_reason(bias, source_tf, matched_zone, sweep, ltf_structure, confirmati
         f"Zone of interest ({source_tf}): {matched_zone['source']}\n"
         f"Trigger on {TRIGGER_TF}: {trigger_text}\n"
         f"Confirmation on {CONFIRM_TF}: {confirmation}"
-    )
+        )
