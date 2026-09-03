@@ -15,13 +15,37 @@ def _get_bias(df) -> str:
     return smc.detect_structure(df)["trend"]
 
 
-def _find_liquidity_target(df, direction):
+def _get_pdh_pdl(daily_df, direction, current_price):
+    if daily_df is None or len(daily_df) < 2:
+        return None, None
+
+    prev_day = daily_df.iloc[-2]
+
+    if direction == "bullish":
+        level = float(prev_day["high"])
+        if level > current_price:
+            return level, "Previous Day High (PDH)"
+        return None, None
+
+    level = float(prev_day["low"])
+    if level < current_price:
+        return level, "Previous Day Low (PDL)"
+    return None, None
+
+
+def _find_liquidity_target(df, direction, daily_df=None):
     equal_level = smc.find_equal_levels(df, direction)
     if equal_level is not None:
         return equal_level, "Equal Highs/Lows (liquidity pool)"
 
-    swings = smc.find_swing_points(df)
     current_price = float(df["close"].iloc[-1])
+
+    if daily_df is not None:
+        pdh_pdl_level, pdh_pdl_label = _get_pdh_pdl(daily_df, direction, current_price)
+        if pdh_pdl_level is not None:
+            return pdh_pdl_level, pdh_pdl_label
+
+    swings = smc.find_swing_points(df)
 
     if direction == "bullish":
         candidates = swings[swings["is_swing_high"]]["high"]
@@ -128,12 +152,12 @@ def _build_reason(path_label, direction_word, liquidity_source, confirm_event,
     )
 
 
-def _process_path(bias_direction_df, sweep_confirm_df, entry_df, path_label):
+def _process_path(bias_direction_df, sweep_confirm_df, entry_df, path_label, daily_df=None):
     direction_word = _get_bias(bias_direction_df)
     if direction_word not in ("bullish", "bearish"):
         return None, f"{path_label}: skipped - bias unclear on source timeframe"
 
-    liquidity_price, liquidity_source = _find_liquidity_target(bias_direction_df, direction_word)
+    liquidity_price, liquidity_source = _find_liquidity_target(bias_direction_df, direction_word, daily_df)
     if liquidity_price is None:
         return None, f"{path_label}: skipped - no liquidity target found"
 
@@ -205,18 +229,18 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
 
     signals = []
 
-    sig, msg = _process_path(daily_df, h4_df, m15_df, "Swing (Daily)")
+    sig, msg = _process_path(daily_df, h4_df, m15_df, "Swing (Daily)", daily_df=None)
     log(msg)
     if sig:
         signals.append(sig)
 
-    sig, msg = _process_path(h4_df, h1_df, m15_df, "Swing (H4)")
+    sig, msg = _process_path(h4_df, h1_df, m15_df, "Swing (H4)", daily_df=daily_df)
     log(msg)
     if sig:
         signals.append(sig)
 
     if m5_df is not None:
-        sig, msg = _process_path(h1_df, m15_df, m5_df, "Scalp (H1)")
+        sig, msg = _process_path(h1_df, m15_df, m5_df, "Scalp (H1)", daily_df=daily_df)
         log(msg)
         if sig:
             signals.append(sig)
