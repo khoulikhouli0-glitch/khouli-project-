@@ -72,16 +72,10 @@ def _build_reason(path_label, direction_word, matched_zone, intermediate_label,
     )
 
 
-def analyze_market(debug: bool = False) -> list:
+def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool = False) -> list:
     def log(msg):
         if debug:
             print(f"[DEBUG] {msg}")
-
-    daily_df = dc.get_candles("D1", count=120)
-    h4_df = dc.get_candles("H4", count=120)
-    h1_df = dc.get_candles("H1", count=150)
-    m15_df = dc.get_candles("M15", count=150)
-    m5_df = dc.get_candles("M5", count=100)
 
     daily_bias = _get_bias(daily_df)
     h4_bias = _get_bias(h4_df)
@@ -117,7 +111,7 @@ def analyze_market(debug: bool = False) -> list:
             "entry_label": "M15",
             "target_multiplier": 2.0,
         })
-    if h1_bias in ("bullish", "bearish"):
+    if h1_bias in ("bullish", "bearish") and m5_df is not None:
         paths.append({
             "label": "Scalp (H1)",
             "bias": h1_bias,
@@ -205,3 +199,13 @@ def analyze_market(debug: bool = False) -> list:
         log("No trade opportunity found on any path (Swing-Daily, Swing-H4, Scalp-H1)")
 
     return signals
+
+
+def analyze_market(debug: bool = False) -> list:
+    daily_df = dc.get_candles("D1", count=120)
+    h4_df = dc.get_candles("H4", count=120)
+    h1_df = dc.get_candles("H1", count=150)
+    m15_df = dc.get_candles("M15", count=150)
+    m5_df = dc.get_candles("M5", count=100)
+
+    return analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug=debug)
