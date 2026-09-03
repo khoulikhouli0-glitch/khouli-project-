@@ -7,7 +7,7 @@ def main():
     Config.validate()
 
     try:
-        signal = analyze_market()
+        signal = analyze_market(debug=True)
     except Exception as e:
         print(f"[Error] {e}")
         raise
