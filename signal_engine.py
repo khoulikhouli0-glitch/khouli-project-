@@ -45,8 +45,8 @@ def analyze_market(debug: bool = False) -> dict | None:
         log("STOP: no zones of interest found on Daily or H4")
         return None
 
-    current_price = dc.get_current_price()
-    ref_price = current_price["ask"] if bias == "bullish" else current_price["bid"]
+    m1_df = dc.get_candles("M1", count=2)
+    ref_price = float(m1_df["close"].iloc[-1])
 
     matched_zone = zones.price_in_any_zone(ref_price, confluence_zones)
     source_tf = "Daily+H4 Confluence"
@@ -136,4 +136,4 @@ def build_reason(bias, source_tf, matched_zone, sweep, ltf_structure, confirmati
         f"Zone of interest ({source_tf}): {matched_zone['source']}\n"
         f"Trigger on {TRIGGER_TF}: {trigger_text}\n"
         f"Confirmation on {CONFIRM_TF}: {confirmation}"
-      )
+    )
