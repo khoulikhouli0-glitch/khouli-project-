@@ -12,6 +12,7 @@ LIQUIDITY_RANGE_PCT = 0.01
 CONFIRM_MAX_WAIT = 6
 MIN_RR = 1.5
 ENTRY_TOLERANCE = 0.0008
+PD_LOOKBACK = 50
 
 
 def _get_bias(bias_df):
@@ -27,6 +28,15 @@ def _get_bias(bias_df):
             return "bullish" if choch == 1 else "bearish"
 
     return None
+
+
+def _premium_discount_zone(zone_df, lookback=PD_LOOKBACK):
+    recent = zone_df.tail(lookback)
+    range_high = float(recent["high"].max())
+    range_low = float(recent["low"].min())
+    midpoint = (range_high + range_low) / 2
+    current_price = float(zone_df["close"].iloc[-1])
+    return "premium" if current_price > midpoint else "discount"
 
 
 def _analyze_zone(zone_df):
@@ -154,10 +164,11 @@ def _find_entry(ob, fvg, ret, direction, current_price):
 
 
 def _build_reason(path_label, direction_word, liquidity_source, confirm_event,
-                   entry_array_name, entry_zone, stop_source, target_price):
+                   entry_array_name, entry_zone, stop_source, target_price, pd_zone):
     return (
         f"Type: {path_label}\n"
         f"Bias: {direction_word}\n"
+        f"Premium/Discount: {pd_zone}\n"
         f"Liquidity target: {liquidity_source} @ {round(target_price, 2)}\n"
         f"Trigger: {confirm_event}\n"
         f"Entry array: {entry_array_name}\n"
@@ -170,6 +181,11 @@ def _process_path(bias_df, zone_df, entry_df, path_label, daily_df=None):
     direction_word = _get_bias(bias_df)
     if direction_word is None:
         return None, f"{path_label}: skipped - no BOS/CHoCH bias found"
+
+    pd_zone = _premium_discount_zone(zone_df)
+    wanted_zone = "discount" if direction_word == "bullish" else "premium"
+    if pd_zone != wanted_zone:
+        return None, f"{path_label}: skipped - price in {pd_zone} zone, need {wanted_zone}"
 
     sw, bc, liq, ob, fvg, ret = _analyze_zone(zone_df)
 
@@ -212,7 +228,7 @@ def _process_path(bias_df, zone_df, entry_df, path_label, daily_df=None):
 
     reason = _build_reason(
         path_label, direction_word, liquidity_source, trigger["event"],
-        entry_array_name, entry_zone, trigger["stop_source"], take_profit,
+        entry_array_name, entry_zone, trigger["stop_source"], take_profit, pd_zone,
     )
 
     signal = {
@@ -267,3 +283,4 @@ def analyze_market(debug: bool = False) -> list:
     m5_df = dc.get_candles("M5", count=100)
 
     return analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug=debug)
+    
