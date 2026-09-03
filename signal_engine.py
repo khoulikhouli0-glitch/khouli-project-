@@ -8,6 +8,7 @@ from config import Config
 
 TOUCH_LOOKBACK = 40
 INTERMEDIATE_WINDOW_CANDLES = 6
+SWING_LEFT_RIGHT = 3
 
 
 def _get_bias(df) -> str:
@@ -60,14 +61,35 @@ def _find_intermediate_confirmation(df, zones_list, direction, lookback, max_wai
     return result
 
 
+def _find_structural_stop(df, direction, up_to_index):
+    sub_df = df.iloc[: up_to_index + 1]
+    if len(sub_df) < (SWING_LEFT_RIGHT * 2 + 3):
+        return None
+
+    swings = smc.find_swing_points(sub_df, left=SWING_LEFT_RIGHT, right=SWING_LEFT_RIGHT)
+
+    if direction == "bullish":
+        lows = swings[swings["is_swing_low"]]["low"]
+        if lows.empty:
+            return None
+        return float(lows.iloc[-1])
+
+    highs = swings[swings["is_swing_high"]]["high"]
+    if highs.empty:
+        return None
+    return float(highs.iloc[-1])
+
+
 def _build_reason(path_label, direction_word, matched_zone, intermediate_label,
-                   intermediate_type, entry_label, entry_confirmation, confidence_label):
+                   intermediate_type, entry_label, entry_confirmation, confidence_label,
+                   stop_source):
     return (
         f"Type: {path_label}\n"
         f"Bias: {direction_word}\n"
         f"Zone of interest: {matched_zone['source']}\n"
         f"Intermediate confirmation on {intermediate_label}: {intermediate_type}\n"
         f"Entry confirmation on {entry_label}: {entry_confirmation}\n"
+        f"Stop basis: {stop_source}\n"
         f"Confidence: {confidence_label}"
     )
 
@@ -100,6 +122,7 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
             "entry_df": m15_df,
             "entry_label": "M15",
             "target_multiplier": 3.0,
+            "structural_stop": False,
         })
     if h4_bias in ("bullish", "bearish"):
         paths.append({
@@ -111,8 +134,15 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
             "entry_df": m15_df,
             "entry_label": "M15",
             "target_multiplier": 2.0,
+            "structural_stop": False,
         })
-    if m15_bias in ("bullish", "bearish") and m5_df is not None:
+
+    h1_conflicts_m15 = (
+        m15_bias in ("bullish", "bearish")
+        and h1_bias in ("bullish", "bearish")
+        and h1_bias != m15_bias
+    )
+    if m15_bias in ("bullish", "bearish") and m5_df is not None and not h1_conflicts_m15:
         paths.append({
             "label": "Scalp (H1)",
             "bias": m15_bias,
@@ -122,7 +152,10 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
             "entry_df": m5_df,
             "entry_label": "M5",
             "target_multiplier": 1.5,
+            "structural_stop": True,
         })
+    elif h1_conflicts_m15:
+        log(f"Scalp (H1): skipped - M15 bias ({m15_bias}) conflicts with H1 bias ({h1_bias})")
 
     signals = []
 
@@ -155,17 +188,36 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
         direction = "BUY" if direction_word == "bullish" else "SELL"
         entry_price = float(path["entry_df"]["close"].iloc[-1])
 
+        stop_source = "Zone edge"
+        stop_loss = None
+
+        if path["structural_stop"]:
+            structural_level = _find_structural_stop(
+                path["intermediate_df"], direction_word, confirm_idx
+            )
+            if structural_level is not None:
+                if direction == "BUY":
+                    stop_loss = structural_level * 0.9993
+                else:
+                    stop_loss = structural_level * 1.0007
+                stop_source = f"Structural swing point on {path['intermediate_label']}"
+
+        if stop_loss is None:
+            if direction == "BUY":
+                stop_loss = matched_zone["bottom"] * 0.9993
+            else:
+                stop_loss = matched_zone["top"] * 1.0007
+            stop_source = "Zone edge"
+
         if direction == "BUY":
-            stop_loss = matched_zone["bottom"] * 0.9993
             if entry_price <= stop_loss:
-                log(f"{path['label']}: STOP - buy zone already invalidated")
+                log(f"{path['label']}: STOP - buy stop already invalidated")
                 continue
             risk = entry_price - stop_loss
             take_profit = entry_price + risk * path["target_multiplier"]
         else:
-            stop_loss = matched_zone["top"] * 1.0007
             if entry_price >= stop_loss:
-                log(f"{path['label']}: STOP - sell zone already invalidated")
+                log(f"{path['label']}: STOP - sell stop already invalidated")
                 continue
             risk = stop_loss - entry_price
             take_profit = entry_price - risk * path["target_multiplier"]
@@ -181,6 +233,7 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
             path["label"], direction_word, matched_zone,
             path["intermediate_label"], intermediate_type,
             path["entry_label"], entry_confirmation, confidence_label,
+            stop_source,
         )
 
         signals.append({
