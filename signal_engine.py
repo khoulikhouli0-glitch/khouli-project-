@@ -80,7 +80,8 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
     daily_bias = _get_bias(daily_df)
     h4_bias = _get_bias(h4_df)
     h1_bias = _get_bias(h1_df)
-    log(f"Daily bias={daily_bias}  H4 bias={h4_bias}  H1 bias={h1_bias}")
+    m15_bias = _get_bias(m15_df)
+    log(f"Daily bias={daily_bias}  H4 bias={h4_bias}  H1 bias={h1_bias}  M15 bias={m15_bias}")
 
     daily_direction = None
     if daily_bias == "bullish":
@@ -111,10 +112,10 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
             "entry_label": "M15",
             "target_multiplier": 2.0,
         })
-    if h1_bias in ("bullish", "bearish") and m5_df is not None:
+    if m15_bias in ("bullish", "bearish") and m5_df is not None:
         paths.append({
             "label": "Scalp (H1)",
-            "bias": h1_bias,
+            "bias": m15_bias,
             "source_df": h1_df,
             "intermediate_df": m15_df,
             "intermediate_label": "M15",
