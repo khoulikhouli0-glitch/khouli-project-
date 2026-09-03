@@ -1,10 +1,3 @@
-Wave and Fibonacci analysis.
-Identifies the most relevant recent swing (wave) on a given timeframe -
-a real swing high and swing low pair that represents the dominant
-recent price move - regardless of how many candles it took to form.
-Then computes a Fibonacci retracement zone on that wave, which acts
-as a "zone of interest" for higher-timeframe context.
-"""
 import pandas as pd
 
 
