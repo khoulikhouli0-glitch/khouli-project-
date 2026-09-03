@@ -256,4 +256,54 @@ def _process_path(bias_direction_df, sweep_confirm_df, entry_df, path_label, dai
     )
 
     signal = {
-        "symbol": Config
+        "symbol": Config.SYMBOL,
+        "direction": direction,
+        "entry": round(entry_price, 2),
+        "stop_loss": round(stop_loss, 2),
+        "take_profit": round(take_profit, 2),
+        "reason": reason,
+        "trade_label": path_label,
+        "confidence": "high",
+        "confidence_label": "منهج SMC: تحيّز + سيولة + (سحب+CHoCH أو BOS) + PD Array/OTE",
+        "timestamp": datetime.now(),
+    }
+    return signal, f"{path_label}: SIGNAL {direction} @ {entry_price} via {entry_array_name} ({trigger['confirm_event']})"
+
+
+def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool = False) -> list:
+    def log(msg):
+        if debug:
+            print(f"[DEBUG] {msg}")
+
+    signals = []
+
+    sig, msg = _process_path(daily_df, h4_df, m15_df, "Swing (Daily)", daily_df=None)
+    log(msg)
+    if sig:
+        signals.append(sig)
+
+    sig, msg = _process_path(h4_df, h1_df, m15_df, "Swing (H4)", daily_df=daily_df)
+    log(msg)
+    if sig:
+        signals.append(sig)
+
+    if m5_df is not None:
+        sig, msg = _process_path(h1_df, m15_df, m5_df, "Scalp (H1)", daily_df=daily_df)
+        log(msg)
+        if sig:
+            signals.append(sig)
+
+    if not signals:
+        log("No trade opportunity found on any path (Swing-Daily, Swing-H4, Scalp)")
+
+    return signals
+
+
+def analyze_market(debug: bool = False) -> list:
+    daily_df = dc.get_candles("D1", count=120)
+    h4_df = dc.get_candles("H4", count=120)
+    h1_df = dc.get_candles("H1", count=150)
+    m15_df = dc.get_candles("M15", count=150)
+    m5_df = dc.get_candles("M5", count=100)
+
+    return analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug=debug)
