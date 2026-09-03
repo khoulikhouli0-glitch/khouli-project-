@@ -1,7 +1,39 @@
+Full multi-timeframe SMC + Wave/Fibonacci signal engine.
+Context layers (Daily, H4, H1):
+  - Determine overall bias.
+  - Collect zones of interest (Fibonacci retracement, Order Blocks,
+    Fair Value Gaps) on Daily and H4.
+  - Detect confluence between Daily and H4 zones.
+  - Use H1 to see where price currently sits relative to those zones.
+
+Trigger layer:
+  - Once price is inside a zone of interest, and any one of
+    (structure break, liquidity sweep, trend change) is present,
+    a candidate setup exists.
+
+Confirmation layer (M15/M5):
+  - Require one classic/SMC confirmation pattern before entering.
+
+Target & label:
+  - Stop loss is placed beyond the zone that invalidates the setup.
+  - Trade is labeled Swing/Scalp with its timeframe source, and the
+    target distance scales with that source.
+"""
 from datetime import datetime
+
 import deriv_connector as dc
 import smc_analysis as smc
+import zone_analysis as zones
+import confirmation_analysis as confirm
 from config import Config
+
+CONFIRM_TF = "M15"
+TRIGGER_TF = "M5"
+
+
+def _get_bias(df) -> str:
+    structure = smc.detect_structure(df)
+    return structure["trend"]
 
 
 def analyze_market(debug: bool = False) -> dict | None:
@@ -9,84 +41,95 @@ def analyze_market(debug: bool = False) -> dict | None:
         if debug:
             print(f"[DEBUG] {msg}")
 
-    htf_df = dc.get_candles(Config.HTF_BIAS, count=200)
-    htf_structure = smc.detect_structure(htf_df)
-    bias = htf_structure["trend"]
-    log(f"HTF ({Config.HTF_BIAS}) bias={bias} last_event={htf_structure['last_event']}")
+    daily_df = dc.get_candles("D1", count=120)
+    h4_df = dc.get_candles("H4", count=120)
+    h1_df = dc.get_candles("H1", count=150)
 
+    daily_bias = _get_bias(daily_df)
+    h4_bias = _get_bias(h4_df)
+    log(f"Daily bias={daily_bias}  H4 bias={h4_bias}")
+
+    bias = h4_bias if h4_bias in ("bullish", "bearish") else daily_bias
     if bias not in ("bullish", "bearish"):
-        log("STOP: no clear HTF bias")
+        log("STOP: no usable bias on Daily or H4")
         return None
 
-    mtf_df = dc.get_candles(Config.MTF_ZONE, count=100)
-    pd_zone = smc.get_premium_discount_zone(mtf_df)
-    log(f"MTF ({Config.MTF_ZONE}) zone={pd_zone['zone']} price={pd_zone['current_price']} mid={pd_zone['midpoint']}")
+    daily_zones = zones.collect_zones(daily_df, direction=bias)
+    h4_zones = zones.collect_zones(h4_df, direction=bias)
+    log(f"Daily zones={daily_zones}")
+    log(f"H4 zones={h4_zones}")
 
-    if bias == "bullish" and pd_zone["zone"] != "discount":
-        log("STOP: bullish bias but price not in discount zone")
+    confluence_zones = zones.find_confluence(daily_zones, h4_zones, "Daily", "H4")
+    all_zones = confluence_zones + daily_zones + h4_zones
+
+    if not all_zones:
+        log("STOP: no zones of interest found on Daily or H4")
         return None
-    if bias == "bearish" and pd_zone["zone"] != "premium":
-        log("STOP: bearish bias but price not in premium zone")
-        return None
-
-    ltf_df = dc.get_candles(Config.LTF_CONFIRM, count=100)
-    sweep = smc.detect_liquidity_sweep(ltf_df)
-    log(f"LTF ({Config.LTF_CONFIRM}) sweep={sweep}")
-
-    if not sweep["swept"]:
-        log("STOP: no liquidity sweep detected")
-        return None
-
-    if bias == "bullish" and sweep["direction"] != "buy_side_taken":
-        log("STOP: sweep direction does not match bullish bias")
-        return None
-    if bias == "bearish" and sweep["direction"] != "sell_side_taken":
-        log("STOP: sweep direction does not match bearish bias")
-        return None
-
-    ltf_structure = smc.detect_structure(ltf_df)
-    log(f"LTF structure: trend={ltf_structure['trend']} last_event={ltf_structure['last_event']}")
-
-    if ltf_structure["last_event"] not in ("BOS", "CHoCH") or ltf_structure["trend"] != bias:
-        log("STOP: no confirming structure break on LTF matching bias")
-        return None
-
-    entry_df = dc.get_candles(Config.ENTRY_TF, count=100)
-    ob = smc.find_last_order_block(entry_df, direction=bias)
-    fvg = smc.find_recent_fvg(entry_df, direction=bias)
-    log(f"Entry TF ({Config.ENTRY_TF}) OB={ob} FVG={fvg}")
 
     current_price = dc.get_current_price()
     ref_price = current_price["ask"] if bias == "bullish" else current_price["bid"]
 
-    entry_zone = ob or fvg
-    zone_type = "Order Block" if ob else ("Fair Value Gap" if fvg else "Fallback distance")
+    matched_zone = zones.price_in_any_zone(ref_price, confluence_zones)
+    source_tf = "Daily+H4 Confluence"
+    if matched_zone is None:
+        matched_zone = zones.price_in_any_zone(ref_price, daily_zones)
+        source_tf = "Daily"
+    if matched_zone is None:
+        matched_zone = zones.price_in_any_zone(ref_price, h4_zones)
+        source_tf = "H4"
+
+    if matched_zone is None:
+        log("STOP: price is not currently inside any zone of interest")
+        return None
+
+    log(f"Price is inside zone: {matched_zone} (source_tf={source_tf})")
+
+    ltf_df = dc.get_candles(TRIGGER_TF, count=100)
+    sweep = smc.detect_liquidity_sweep(ltf_df)
+    ltf_structure = smc.detect_structure(ltf_df)
+
+    trigger_present = (
+        sweep["swept"]
+        or ltf_structure["last_event"] in ("BOS", "CHoCH")
+    )
+    if not trigger_present:
+        log("STOP: no trigger (sweep/structure change) yet at the zone")
+        return None
+
+    confirm_df = dc.get_candles(CONFIRM_TF, count=60)
+    confirmation = confirm.get_confirmation(confirm_df, direction=bias)
+    log(f"Confirmation on {CONFIRM_TF}: {confirmation}")
+
+    if confirmation is None:
+        log("STOP: no confirmation pattern yet on entry timeframe")
+        return None
 
     direction = "BUY" if bias == "bullish" else "SELL"
     entry_price = ref_price
 
-    if entry_zone is not None:
-        if direction == "BUY":
-            stop_loss = entry_zone["bottom"] * 0.9995
-        else:
-            stop_loss = entry_zone["top"] * 1.0005
+    if direction == "BUY":
+        stop_loss = matched_zone["bottom"] * 0.9993
     else:
-        avg_range = (entry_df["high"] - entry_df["low"]).tail(20).mean()
-        if direction == "BUY":
-            stop_loss = entry_price - avg_range * 2
-        else:
-            stop_loss = entry_price + avg_range * 2
+        stop_loss = matched_zone["top"] * 1.0007
+
+    if "Daily" in source_tf:
+        target_multiplier = 3.0
+        trade_label = f"Swing ({source_tf})"
+    elif "H4" in source_tf:
+        target_multiplier = 2.0
+        trade_label = f"Swing ({source_tf})"
+    else:
+        target_multiplier = 1.5
+        trade_label = f"Scalp ({source_tf})"
 
     if direction == "BUY":
         risk = entry_price - stop_loss
-        take_profit = entry_price + risk * 1.5
+        take_profit = entry_price + risk * target_multiplier
     else:
         risk = stop_loss - entry_price
-        take_profit = entry_price - risk * 1.5
+        take_profit = entry_price - risk * target_multiplier
 
-    log(f"SIGNAL FOUND: {direction} entry={entry_price} sl={stop_loss} tp={take_profit}")
-
-    reason = build_reason(bias, pd_zone, sweep, ltf_structure, zone_type)
+    reason = build_reason(bias, source_tf, matched_zone, sweep, ltf_structure, confirmation, trade_label)
 
     return {
         "symbol": Config.SYMBOL,
@@ -95,17 +138,23 @@ def analyze_market(debug: bool = False) -> dict | None:
         "stop_loss": round(stop_loss, 2),
         "take_profit": round(take_profit, 2),
         "reason": reason,
+        "trade_label": trade_label,
         "timestamp": datetime.now(),
     }
 
 
-def build_reason(bias, pd_zone, sweep, ltf_structure, zone_type) -> str:
-    zone_label = "Premium" if pd_zone["zone"] == "premium" else "Discount"
-    sweep_label = "buy-side liquidity" if sweep["direction"] == "buy_side_taken" else "sell-side liquidity"
+def build_reason(bias, source_tf, matched_zone, sweep, ltf_structure, confirmation, trade_label) -> str:
+    trigger_desc = []
+    if sweep["swept"]:
+        trigger_desc.append("liquidity sweep")
+    if ltf_structure["last_event"] in ("BOS", "CHoCH"):
+        trigger_desc.append(ltf_structure["last_event"])
+    trigger_text = " + ".join(trigger_desc) if trigger_desc else "context alignment"
 
     return (
-        f"HTF bias ({Config.HTF_BIAS}): {bias}\n"
-        f"Price inside {zone_label} zone on {Config.MTF_ZONE}\n"
-        f"Swept {sweep_label} then {ltf_structure['last_event']} on {Config.LTF_CONFIRM}\n"
-        f"Immediate entry after structure confirmation, stop based on {zone_type} on {Config.ENTRY_TF}"
+        f"Type: {trade_label}\n"
+        f"Bias: {bias}\n"
+        f"Zone of interest ({source_tf}): {matched_zone['source']}\n"
+        f"Trigger on {TRIGGER_TF}: {trigger_text}\n"
+        f"Confirmation on {CONFIRM_TF}: {confirmation}"
     )
