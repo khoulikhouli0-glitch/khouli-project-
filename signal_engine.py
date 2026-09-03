@@ -37,7 +37,7 @@ def _find_liquidity_target(df, direction):
     return float(candidates.max()), "Nearest swing low"
 
 
-def _find_sweep_and_confirmation(df, direction, lookback, max_wait):
+def _find_reversal_entry(df, direction, lookback, max_wait):
     n = len(df)
     start = max(1, n - lookback)
 
@@ -55,24 +55,44 @@ def _find_sweep_and_confirmation(df, direction, lookback, max_wait):
         for j in range(i, confirm_end):
             confirm_df = df.iloc[: j + 1]
             structure = smc.detect_structure(confirm_df)
-            if structure["last_event"] in ("BOS", "CHoCH") and structure["trend"] == direction:
-                return i, j, structure["last_event"]
+            if structure["last_event"] == "CHoCH" and structure["trend"] == direction:
+                impulse_start = float(df.iloc[i]["low"] if direction == "bullish" else df.iloc[i]["high"])
+                segment = df.iloc[i: j + 1]
+                impulse_end = float(segment["high"].max() if direction == "bullish" else segment["low"].min())
+                stop_ref = float(df.iloc[i]["low"] if direction == "bullish" else df.iloc[i]["high"])
+                return {
+                    "confirm_index": j,
+                    "confirm_event": "Sweep then CHoCH",
+                    "impulse_start": impulse_start,
+                    "impulse_end": impulse_end,
+                    "stop_ref": stop_ref,
+                    "stop_source": "Behind sweep extreme",
+                }
 
     return None
 
 
-def _find_impulse_leg(df, sweep_index, confirm_index, direction):
-    segment = df.iloc[sweep_index: confirm_index + 1]
-    if direction == "bullish":
-        start_price = float(df.iloc[sweep_index]["low"])
-        end_price = float(segment["high"].max())
-        wave_dir = "up"
-    else:
-        start_price = float(df.iloc[sweep_index]["high"])
-        end_price = float(segment["low"].min())
-        wave_dir = "down"
+def _find_continuation_entry(df, direction, lookback):
+    n = len(df)
+    start = max(1, n - lookback)
 
-    return {"start_price": start_price, "end_price": end_price, "direction": wave_dir}
+    for i in range(n - 1, start - 1, -1):
+        sub_df = df.iloc[: i + 1]
+        structure = smc.detect_structure(sub_df)
+        if structure["last_event"] == "BOS" and structure["trend"] == direction:
+            level = float(structure["level"])
+            recent = df.iloc[max(0, i - 3): i + 1]
+            impulse_end = float(recent["high"].max() if direction == "bullish" else recent["low"].min())
+            return {
+                "confirm_index": i,
+                "confirm_event": "BOS (continuation)",
+                "impulse_start": level,
+                "impulse_end": impulse_end,
+                "stop_ref": level,
+                "stop_source": "Behind broken structure level",
+            }
+
+    return None
 
 
 def _find_pd_array(df, direction):
@@ -101,7 +121,7 @@ def _build_reason(path_label, direction_word, liquidity_source, confirm_event,
         f"Type: {path_label}\n"
         f"Bias: {direction_word}\n"
         f"Liquidity target: {liquidity_source} @ {round(target_price, 2)}\n"
-        f"Manipulation: Sweep then {confirm_event}\n"
+        f"Trigger: {confirm_event}\n"
         f"Entry array: {entry_array_name}\n"
         f"Entry range: {round(entry_zone['bottom'], 2)} - {round(entry_zone['top'], 2)}\n"
         f"Stop basis: {stop_source}"
@@ -117,15 +137,20 @@ def _process_path(bias_direction_df, sweep_confirm_df, entry_df, path_label):
     if liquidity_price is None:
         return None, f"{path_label}: skipped - no liquidity target found"
 
-    found = _find_sweep_and_confirmation(sweep_confirm_df, direction_word, SWEEP_LOOKBACK, CONFIRM_MAX_WAIT)
-    if found is None:
-        return None, f"{path_label}: skipped - no sweep+confirmation sequence found"
-    sweep_index, confirm_index, confirm_event = found
+    trigger = _find_reversal_entry(sweep_confirm_df, direction_word, SWEEP_LOOKBACK, CONFIRM_MAX_WAIT)
+    if trigger is None:
+        trigger = _find_continuation_entry(sweep_confirm_df, direction_word, SWEEP_LOOKBACK)
+    if trigger is None:
+        return None, f"{path_label}: skipped - no BOS/CHoCH trigger found"
 
-    impulse = _find_impulse_leg(sweep_confirm_df, sweep_index, confirm_index, direction_word)
+    impulse = {
+        "start_price": trigger["impulse_start"],
+        "end_price": trigger["impulse_end"],
+        "direction": "up" if direction_word == "bullish" else "down",
+    }
     ote_zone = wave.fibonacci_zone(impulse)
 
-    pd_candidates = _find_pd_array(sweep_confirm_df.iloc[: confirm_index + 1], direction_word)
+    pd_candidates = _find_pd_array(sweep_confirm_df.iloc[: trigger["confirm_index"] + 1], direction_word)
 
     current_price = float(entry_df["close"].iloc[-1])
     entry_array_name, entry_zone = _find_entry_match(pd_candidates, ote_zone, current_price)
@@ -135,11 +160,10 @@ def _process_path(bias_direction_df, sweep_confirm_df, entry_df, path_label):
     direction = "BUY" if direction_word == "bullish" else "SELL"
     entry_price = current_price
 
-    sweep_candle = sweep_confirm_df.iloc[sweep_index]
     if direction == "BUY":
-        stop_loss = float(sweep_candle["low"]) * 0.9993
+        stop_loss = trigger["stop_ref"] * 0.9993
     else:
-        stop_loss = float(sweep_candle["high"]) * 1.0007
+        stop_loss = trigger["stop_ref"] * 1.0007
 
     if direction == "BUY" and entry_price <= stop_loss:
         return None, f"{path_label}: skipped - stop already invalidated"
@@ -153,11 +177,10 @@ def _process_path(bias_direction_df, sweep_confirm_df, entry_df, path_label):
         return None, f"{path_label}: skipped - R:R {round(rr, 2)} below minimum {MIN_RR}"
 
     take_profit = liquidity_price
-    stop_source = "Behind sweep extreme"
 
     reason = _build_reason(
-        path_label, direction_word, liquidity_source, confirm_event,
-        entry_array_name, entry_zone, stop_source, take_profit,
+        path_label, direction_word, liquidity_source, trigger["confirm_event"],
+        entry_array_name, entry_zone, trigger["stop_source"], take_profit,
     )
 
     signal = {
@@ -169,10 +192,10 @@ def _process_path(bias_direction_df, sweep_confirm_df, entry_df, path_label):
         "reason": reason,
         "trade_label": path_label,
         "confidence": "high",
-        "confidence_label": "منهج SMC كامل: تحيّز + سيولة + تلاعب + تأكيد هيكلي + PD Array/OTE",
+        "confidence_label": "منهج SMC: تحيّز + سيولة + (سحب+CHoCH أو BOS) + PD Array/OTE",
         "timestamp": datetime.now(),
     }
-    return signal, f"{path_label}: SIGNAL {direction} @ {entry_price} via {entry_array_name}"
+    return signal, f"{path_label}: SIGNAL {direction} @ {entry_price} via {entry_array_name} ({trigger['confirm_event']})"
 
 
 def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool = False) -> list:
