@@ -1,5 +1,5 @@
 """
-إرسال إشارات الصفقات إلى بوت تلغرام.
+Sends trade signals to a Telegram bot.
 """
 import asyncio
 from telegram import Bot
@@ -10,13 +10,15 @@ _bot = Bot(token=Config.TELEGRAM_BOT_TOKEN)
 
 def format_signal_message(signal: dict) -> str:
     emoji = "🟢" if signal["direction"] == "BUY" else "🔴"
+    label = signal.get("trade_label", "")
     return (
-        f"{emoji} <b>إشارة {signal['direction']} - {signal['symbol']}</b>\n\n"
-        f"💰 الدخول: <code>{signal['entry']}</code>\n"
-        f"🛑 الستوب: <code>{signal['stop_loss']}</code>\n"
-        f"🎯 الهدف: <code>{signal['take_profit']}</code>\n\n"
-        f"📊 <b>السبب:</b>\n{signal['reason']}\n\n"
-        f"⏱ {signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}"
+        f"{emoji} <b>{signal['direction']} - {signal['symbol']}</b>\n"
+        f"<b>{label}</b>\n\n"
+        f"Entry: <code>{signal['entry']}</code>\n"
+        f"Stop Loss: <code>{signal['stop_loss']}</code>\n"
+        f"Take Profit: <code>{signal['take_profit']}</code>\n\n"
+        f"<b>Reason:</b>\n{signal['reason']}\n\n"
+        f"{signal['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}"
     )
 
 
@@ -31,7 +33,7 @@ async def _send_async(text: str):
 def send_signal(signal: dict):
     text = format_signal_message(signal)
     asyncio.run(_send_async(text))
-    print("[Telegram] تم إرسال الإشارة.")
+    print("[Telegram] Signal sent.")
 
 
 def send_text(text: str):
