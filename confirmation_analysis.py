@@ -1,8 +1,3 @@
-Entry confirmation patterns on small timeframes (M15/M5).
-These are the final trigger patterns checked once price has reached
-a zone of interest identified on the higher timeframes. Any single
-one of them is enough to confirm an entry.
-"""
 import pandas as pd
 
 
