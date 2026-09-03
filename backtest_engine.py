@@ -15,7 +15,7 @@ M5_WINDOW = 100
 MAX_HOLD = {
     "Swing (Daily)": timedelta(days=10),
     "Swing (H4)": timedelta(days=5),
-    "Scalp (H1)": timedelta(days=1),
+    "Scalp (H1 Zone / M15 Bias)": timedelta(days=1),
 }
 
 
@@ -74,7 +74,7 @@ def _summarize(trades):
 def _build_report(closed_trades):
     report = {"by_path": {}, "by_confidence": {}, "overall": {}}
 
-    for label in ("Swing (Daily)", "Swing (H4)", "Scalp (H1)"):
+    for label in ("Swing (Daily)", "Swing (H4)", "Scalp (H1 Zone / M15 Bias)"):
         path_trades = [t for t in closed_trades if t["trade_label"] == label]
         report["by_path"][label] = _summarize(path_trades)
 
