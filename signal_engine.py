@@ -61,7 +61,55 @@ def _find_liquidity_target(df, direction, daily_df=None):
     return float(candidates.max()), "Nearest swing low"
 
 
-def _find_reversal_entry(df, direction, lookback, max_wait):
+def _last_n_swings(swings_df, up_to_index, n=4):
+    window = swings_df.iloc[: up_to_index + 1]
+    highs = window[window["is_swing_high"]][["time", "high"]].tail(n)
+    lows = window[window["is_swing_low"]][["time", "low"]].tail(n)
+    return highs, lows
+
+
+def _structure_at(df, swings_df, up_to_index):
+    highs, lows = _last_n_swings(swings_df, up_to_index)
+    if len(highs) < 2 or len(lows) < 2:
+        return {"trend": "unclear", "last_event": None, "level": None}
+
+    last_close = df["close"].iloc[up_to_index]
+    last_high = highs["high"].iloc[-1]
+    prev_high = highs["high"].iloc[-2]
+    last_low = lows["low"].iloc[-1]
+    prev_low = lows["low"].iloc[-2]
+
+    bullish_structure = last_high > prev_high and last_low > prev_low
+    bearish_structure = last_high < prev_high and last_low < prev_low
+
+    trend = "unclear"
+    last_event = None
+    level = None
+
+    if bullish_structure:
+        trend = "bullish"
+        if last_close > last_high:
+            last_event = "BOS"
+            level = last_high
+    elif bearish_structure:
+        trend = "bearish"
+        if last_close < last_low:
+            last_event = "BOS"
+            level = last_low
+    else:
+        if last_close > last_high:
+            trend = "bullish"
+            last_event = "CHoCH"
+            level = last_high
+        elif last_close < last_low:
+            trend = "bearish"
+            last_event = "CHoCH"
+            level = last_low
+
+    return {"trend": trend, "last_event": last_event, "level": level}
+
+
+def _find_reversal_entry(df, swings_df, direction, lookback, max_wait):
     n = len(df)
     start = max(1, n - lookback)
 
@@ -77,8 +125,7 @@ def _find_reversal_entry(df, direction, lookback, max_wait):
 
         confirm_end = min(n, i + max_wait + 1)
         for j in range(i, confirm_end):
-            confirm_df = df.iloc[: j + 1]
-            structure = smc.detect_structure(confirm_df)
+            structure = _structure_at(df, swings_df, j)
             if structure["last_event"] == "CHoCH" and structure["trend"] == direction:
                 impulse_start = float(df.iloc[i]["low"] if direction == "bullish" else df.iloc[i]["high"])
                 segment = df.iloc[i: j + 1]
@@ -96,13 +143,12 @@ def _find_reversal_entry(df, direction, lookback, max_wait):
     return None
 
 
-def _find_continuation_entry(df, direction, lookback):
+def _find_continuation_entry(df, swings_df, direction, lookback):
     n = len(df)
     start = max(1, n - lookback)
 
     for i in range(n - 1, start - 1, -1):
-        sub_df = df.iloc[: i + 1]
-        structure = smc.detect_structure(sub_df)
+        structure = _structure_at(df, swings_df, i)
         if structure["last_event"] == "BOS" and structure["trend"] == direction:
             level = float(structure["level"])
             recent = df.iloc[max(0, i - 3): i + 1]
@@ -161,9 +207,11 @@ def _process_path(bias_direction_df, sweep_confirm_df, entry_df, path_label, dai
     if liquidity_price is None:
         return None, f"{path_label}: skipped - no liquidity target found"
 
-    trigger = _find_reversal_entry(sweep_confirm_df, direction_word, SWEEP_LOOKBACK, CONFIRM_MAX_WAIT)
+    swings_df = smc.find_swing_points(sweep_confirm_df)
+
+    trigger = _find_reversal_entry(sweep_confirm_df, swings_df, direction_word, SWEEP_LOOKBACK, CONFIRM_MAX_WAIT)
     if trigger is None:
-        trigger = _find_continuation_entry(sweep_confirm_df, direction_word, SWEEP_LOOKBACK)
+        trigger = _find_continuation_entry(sweep_confirm_df, swings_df, direction_word, SWEEP_LOOKBACK)
     if trigger is None:
         return None, f"{path_label}: skipped - no BOS/CHoCH trigger found"
 
@@ -208,54 +256,4 @@ def _process_path(bias_direction_df, sweep_confirm_df, entry_df, path_label, dai
     )
 
     signal = {
-        "symbol": Config.SYMBOL,
-        "direction": direction,
-        "entry": round(entry_price, 2),
-        "stop_loss": round(stop_loss, 2),
-        "take_profit": round(take_profit, 2),
-        "reason": reason,
-        "trade_label": path_label,
-        "confidence": "high",
-        "confidence_label": "منهج SMC: تحيّز + سيولة + (سحب+CHoCH أو BOS) + PD Array/OTE",
-        "timestamp": datetime.now(),
-    }
-    return signal, f"{path_label}: SIGNAL {direction} @ {entry_price} via {entry_array_name} ({trigger['confirm_event']})"
-
-
-def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool = False) -> list:
-    def log(msg):
-        if debug:
-            print(f"[DEBUG] {msg}")
-
-    signals = []
-
-    sig, msg = _process_path(daily_df, h4_df, m15_df, "Swing (Daily)", daily_df=None)
-    log(msg)
-    if sig:
-        signals.append(sig)
-
-    sig, msg = _process_path(h4_df, h1_df, m15_df, "Swing (H4)", daily_df=daily_df)
-    log(msg)
-    if sig:
-        signals.append(sig)
-
-    if m5_df is not None:
-        sig, msg = _process_path(h1_df, m15_df, m5_df, "Scalp (H1)", daily_df=daily_df)
-        log(msg)
-        if sig:
-            signals.append(sig)
-
-    if not signals:
-        log("No trade opportunity found on any path (Swing-Daily, Swing-H4, Scalp)")
-
-    return signals
-
-
-def analyze_market(debug: bool = False) -> list:
-    daily_df = dc.get_candles("D1", count=120)
-    h4_df = dc.get_candles("H4", count=120)
-    h1_df = dc.get_candles("H1", count=150)
-    m15_df = dc.get_candles("M15", count=150)
-    m5_df = dc.get_candles("M5", count=100)
-
-    return analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug=debug)
+        "symbol": Config
