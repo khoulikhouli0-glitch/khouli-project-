@@ -7,14 +7,15 @@ def main():
     Config.validate()
 
     try:
-        signal = analyze_market(debug=True)
+        signals = analyze_market(debug=True)
     except Exception as e:
         print(f"[Error] {e}")
         raise
 
-    if signal:
-        print(f"[Signal] {signal['direction']} @ {signal['entry']}")
-        notifier.send_signal(signal)
+    if signals:
+        for signal in signals:
+            print(f"[Signal] {signal['trade_label']} {signal['direction']} @ {signal['entry']} ({signal['confidence']})")
+        notifier.send_signals(signals)
     else:
         print("No trade opportunity right now.")
 
