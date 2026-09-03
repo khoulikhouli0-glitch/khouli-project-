@@ -1,24 +1,3 @@
-Full multi-timeframe SMC + Wave/Fibonacci signal engine.
-Context layers (Daily, H4, H1):
-  - Determine overall bias.
-  - Collect zones of interest (Fibonacci retracement, Order Blocks,
-    Fair Value Gaps) on Daily and H4.
-  - Detect confluence between Daily and H4 zones.
-  - Use H1 to see where price currently sits relative to those zones.
-
-Trigger layer:
-  - Once price is inside a zone of interest, and any one of
-    (structure break, liquidity sweep, trend change) is present,
-    a candidate setup exists.
-
-Confirmation layer (M15/M5):
-  - Require one classic/SMC confirmation pattern before entering.
-
-Target & label:
-  - Stop loss is placed beyond the zone that invalidates the setup.
-  - Trade is labeled Swing/Scalp with its timeframe source, and the
-    target distance scales with that source.
-"""
 from datetime import datetime
 
 import deriv_connector as dc
@@ -157,4 +136,4 @@ def build_reason(bias, source_tf, matched_zone, sweep, ltf_structure, confirmati
         f"Zone of interest ({source_tf}): {matched_zone['source']}\n"
         f"Trigger on {TRIGGER_TF}: {trigger_text}\n"
         f"Confirmation on {CONFIRM_TF}: {confirmation}"
-    )
+      )
