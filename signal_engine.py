@@ -35,11 +35,15 @@ def analyze_market(debug: bool = False) -> dict | None:
 
     daily_zones = zones.collect_zones(daily_df, direction=bias)
     h4_zones = zones.collect_zones(h4_df, direction=bias)
+    h1_zones = zones.collect_zones(h1_df, direction=bias)
     log(f"Daily zones={daily_zones}")
     log(f"H4 zones={h4_zones}")
+    log(f"H1 zones={h1_zones}")
 
     confluence_zones = zones.find_confluence(daily_zones, h4_zones, "Daily", "H4")
-    all_zones = confluence_zones + daily_zones + h4_zones
+    confluence_zones += zones.find_confluence(daily_zones, h1_zones, "Daily", "H1")
+    confluence_zones += zones.find_confluence(h4_zones, h1_zones, "H4", "H1")
+    all_zones = confluence_zones + daily_zones + h4_zones + h1_zones
 
     if not all_zones:
         log("STOP: no zones of interest found on Daily or H4")
@@ -49,13 +53,16 @@ def analyze_market(debug: bool = False) -> dict | None:
     ref_price = float(m1_df["close"].iloc[-1])
 
     matched_zone = zones.price_in_any_zone(ref_price, confluence_zones)
-    source_tf = "Daily+H4 Confluence"
+    source_tf = "Confluence"
     if matched_zone is None:
         matched_zone = zones.price_in_any_zone(ref_price, daily_zones)
         source_tf = "Daily"
     if matched_zone is None:
         matched_zone = zones.price_in_any_zone(ref_price, h4_zones)
         source_tf = "H4"
+    if matched_zone is None:
+        matched_zone = zones.price_in_any_zone(ref_price, h1_zones)
+        source_tf = "H1"
 
     if matched_zone is None:
         log("STOP: price is not currently inside any zone of interest")
@@ -97,8 +104,11 @@ def analyze_market(debug: bool = False) -> dict | None:
     elif "H4" in source_tf:
         target_multiplier = 2.0
         trade_label = f"Swing ({source_tf})"
-    else:
+    elif "H1" in source_tf:
         target_multiplier = 1.5
+        trade_label = f"Scalp ({source_tf})"
+    else:
+        target_multiplier = 1.2
         trade_label = f"Scalp ({source_tf})"
 
     if direction == "BUY":
