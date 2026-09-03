@@ -7,7 +7,7 @@ import wave_analysis as wave
 from config import Config
 
 SWEEP_LOOKBACK = 40
-CHOCH_MAX_WAIT = 6
+CONFIRM_MAX_WAIT = 6
 MIN_RR = 1.5
 
 
@@ -37,7 +37,7 @@ def _find_liquidity_target(df, direction):
     return float(candidates.max()), "Nearest swing low"
 
 
-def _find_sweep_and_choch(df, direction, lookback, max_wait):
+def _find_sweep_and_confirmation(df, direction, lookback, max_wait):
     n = len(df)
     start = max(1, n - lookback)
 
@@ -53,16 +53,16 @@ def _find_sweep_and_choch(df, direction, lookback, max_wait):
 
         confirm_end = min(n, i + max_wait + 1)
         for j in range(i, confirm_end):
-            choch_df = df.iloc[: j + 1]
-            structure = smc.detect_structure(choch_df)
-            if structure["last_event"] == "CHoCH" and structure["trend"] == direction:
-                return i, j
+            confirm_df = df.iloc[: j + 1]
+            structure = smc.detect_structure(confirm_df)
+            if structure["last_event"] in ("BOS", "CHoCH") and structure["trend"] == direction:
+                return i, j, structure["last_event"]
 
     return None
 
 
-def _find_impulse_leg(df, sweep_index, choch_index, direction):
-    segment = df.iloc[sweep_index: choch_index + 1]
+def _find_impulse_leg(df, sweep_index, confirm_index, direction):
+    segment = df.iloc[sweep_index: confirm_index + 1]
     if direction == "bullish":
         start_price = float(df.iloc[sweep_index]["low"])
         end_price = float(segment["high"].max())
@@ -85,21 +85,30 @@ def _find_pd_array(df, direction):
     return [(name, z) for name, z in checks if z is not None]
 
 
-def _build_reason(path_label, direction_word, liquidity_source, sweep_choch_label,
-                   pd_array_name, entry_zone, stop_source, target_price):
+def _find_entry_match(pd_candidates, ote_zone, current_price):
+    all_candidates = list(pd_candidates) + [("OTE (61.8%-79%)", ote_zone)]
+    for name, zone in all_candidates:
+        top = zone["top"] * 1.0008
+        bottom = zone["bottom"] * 0.9992
+        if bottom <= current_price <= top:
+            return name, zone
+    return None, None
+
+
+def _build_reason(path_label, direction_word, liquidity_source, confirm_event,
+                   entry_array_name, entry_zone, stop_source, target_price):
     return (
         f"Type: {path_label}\n"
         f"Bias: {direction_word}\n"
         f"Liquidity target: {liquidity_source} @ {round(target_price, 2)}\n"
-        f"Manipulation: {sweep_choch_label}\n"
-        f"Entry array: OTE (61.8%-79%) x {pd_array_name}\n"
+        f"Manipulation: Sweep then {confirm_event}\n"
+        f"Entry array: {entry_array_name}\n"
         f"Entry range: {round(entry_zone['bottom'], 2)} - {round(entry_zone['top'], 2)}\n"
         f"Stop basis: {stop_source}"
     )
 
 
-def _process_path(label, bias_direction_df, sweep_choch_df, entry_df, path_label,
-                   entry_price_ref):
+def _process_path(bias_direction_df, sweep_confirm_df, entry_df, path_label):
     direction_word = _get_bias(bias_direction_df)
     if direction_word not in ("bullish", "bearish"):
         return None, f"{path_label}: skipped - bias unclear on source timeframe"
@@ -108,40 +117,25 @@ def _process_path(label, bias_direction_df, sweep_choch_df, entry_df, path_label
     if liquidity_price is None:
         return None, f"{path_label}: skipped - no liquidity target found"
 
-    found = _find_sweep_and_choch(sweep_choch_df, direction_word, SWEEP_LOOKBACK, CHOCH_MAX_WAIT)
+    found = _find_sweep_and_confirmation(sweep_confirm_df, direction_word, SWEEP_LOOKBACK, CONFIRM_MAX_WAIT)
     if found is None:
-        return None, f"{path_label}: skipped - no sweep+CHoCH sequence found"
-    sweep_index, choch_index = found
+        return None, f"{path_label}: skipped - no sweep+confirmation sequence found"
+    sweep_index, confirm_index, confirm_event = found
 
-    impulse = _find_impulse_leg(sweep_choch_df, sweep_index, choch_index, direction_word)
+    impulse = _find_impulse_leg(sweep_confirm_df, sweep_index, confirm_index, direction_word)
     ote_zone = wave.fibonacci_zone(impulse)
 
-    pd_candidates = _find_pd_array(sweep_choch_df.iloc[: choch_index + 1], direction_word)
-    if not pd_candidates:
-        return None, f"{path_label}: skipped - no PD array (OB/Breaker/Mitigation/InvFVG) found"
+    pd_candidates = _find_pd_array(sweep_confirm_df.iloc[: confirm_index + 1], direction_word)
 
-    matched_pd = None
-    entry_zone = None
-    for name, pd_zone in pd_candidates:
-        if zones.zones_overlap(ote_zone, pd_zone):
-            top = min(ote_zone["top"], pd_zone["top"])
-            bottom = max(ote_zone["bottom"], pd_zone["bottom"])
-            if top >= bottom:
-                matched_pd = name
-                entry_zone = {"top": top, "bottom": bottom}
-                break
-
+    current_price = float(entry_df["close"].iloc[-1])
+    entry_array_name, entry_zone = _find_entry_match(pd_candidates, ote_zone, current_price)
     if entry_zone is None:
-        return None, f"{path_label}: skipped - OTE does not overlap any PD array"
-
-    current_price = float(entry_price_ref["close"].iloc[-1])
-    if not zones.price_in_any_zone(current_price, [entry_zone]):
-        return None, f"{path_label}: skipped - price not yet in OTE x {matched_pd} entry range"
+        return None, f"{path_label}: skipped - price not yet in any entry array (PD/OTE)"
 
     direction = "BUY" if direction_word == "bullish" else "SELL"
     entry_price = current_price
 
-    sweep_candle = sweep_choch_df.iloc[sweep_index]
+    sweep_candle = sweep_confirm_df.iloc[sweep_index]
     if direction == "BUY":
         stop_loss = float(sweep_candle["low"]) * 0.9993
     else:
@@ -159,12 +153,11 @@ def _process_path(label, bias_direction_df, sweep_choch_df, entry_df, path_label
         return None, f"{path_label}: skipped - R:R {round(rr, 2)} below minimum {MIN_RR}"
 
     take_profit = liquidity_price
-    sweep_choch_label = f"Sweep then CHoCH confirmed"
     stop_source = "Behind sweep extreme"
 
     reason = _build_reason(
-        path_label, direction_word, liquidity_source, sweep_choch_label,
-        matched_pd, entry_zone, stop_source, take_profit,
+        path_label, direction_word, liquidity_source, confirm_event,
+        entry_array_name, entry_zone, stop_source, take_profit,
     )
 
     signal = {
@@ -176,10 +169,10 @@ def _process_path(label, bias_direction_df, sweep_choch_df, entry_df, path_label
         "reason": reason,
         "trade_label": path_label,
         "confidence": "high",
-        "confidence_label": "منهج SMC كامل: تحيّز + سيولة + تلاعب + CHoCH + OTE x PD Array",
+        "confidence_label": "منهج SMC كامل: تحيّز + سيولة + تلاعب + تأكيد هيكلي + PD Array/OTE",
         "timestamp": datetime.now(),
     }
-    return signal, f"{path_label}: SIGNAL {direction} @ {entry_price}"
+    return signal, f"{path_label}: SIGNAL {direction} @ {entry_price} via {entry_array_name}"
 
 
 def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool = False) -> list:
@@ -189,18 +182,18 @@ def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool 
 
     signals = []
 
-    sig, msg = _process_path("Swing (Daily)", daily_df, h4_df, m15_df, "Swing (Daily)", m15_df)
+    sig, msg = _process_path(daily_df, h4_df, m15_df, "Swing (Daily)")
     log(msg)
     if sig:
         signals.append(sig)
 
-    sig, msg = _process_path("Swing (H4)", h4_df, h1_df, m15_df, "Swing (H4)", m15_df)
+    sig, msg = _process_path(h4_df, h1_df, m15_df, "Swing (H4)")
     log(msg)
     if sig:
         signals.append(sig)
 
     if m5_df is not None:
-        sig, msg = _process_path("Scalp (H1)", h1_df, m15_df, m5_df, "Scalp (H1)", m5_df)
+        sig, msg = _process_path(h1_df, m15_df, m5_df, "Scalp (H1)")
         log(msg)
         if sig:
             signals.append(sig)
