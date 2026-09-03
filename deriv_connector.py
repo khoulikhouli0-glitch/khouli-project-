@@ -83,6 +83,58 @@ def get_candles(timeframe_str: str, count: int = 300) -> pd.DataFrame:
     return df[["time", "open", "high", "low", "close", "volume"]]
 
 
+def get_historical_candles(timeframe_str: str, months: int = 3) -> pd.DataFrame:
+    granularity = TIMEFRAME_SECONDS.get(timeframe_str)
+    if granularity is None:
+        raise ValueError(f"Unsupported timeframe: {timeframe_str}")
+
+    symbol = SYMBOL_MAP.get(Config.SYMBOL, Config.SYMBOL)
+    seconds_needed = months * 30 * 24 * 3600
+    remaining_seconds = seconds_needed
+    current_end = "latest"
+    all_dfs = []
+
+    while remaining_seconds > 0:
+        payload = {
+            "ticks_history": symbol,
+            "adjust_start_time": 1,
+            "count": 5000,
+            "end": current_end,
+            "start": 1,
+            "style": "candles",
+            "granularity": granularity,
+        }
+        result = asyncio.run(_request(payload))
+
+        if "error" in result:
+            raise RuntimeError(f"Deriv API error: {result['error'].get('message')}")
+
+        candles = result.get("candles", [])
+        if not candles:
+            break
+
+        df = pd.DataFrame(candles)
+        df["time"] = pd.to_datetime(df["epoch"], unit="s")
+        for col in ["open", "high", "low", "close"]:
+            df[col] = df[col].astype(float)
+        df["volume"] = 0
+        all_dfs.append(df[["time", "open", "high", "low", "close", "volume", "epoch"]])
+
+        earliest_epoch = int(df["epoch"].iloc[0])
+        current_end = earliest_epoch - 1
+        remaining_seconds -= granularity * len(df)
+
+        if len(df) < 5000:
+            break
+
+    if not all_dfs:
+        raise RuntimeError(f"No historical candles for {symbol} on {timeframe_str}")
+
+    full_df = pd.concat(all_dfs, ignore_index=True)
+    full_df = full_df.drop_duplicates(subset="epoch").sort_values("time").reset_index(drop=True)
+    return full_df[["time", "open", "high", "low", "close", "volume"]]
+
+
 def get_current_price() -> dict:
     symbol = SYMBOL_MAP.get(Config.SYMBOL, Config.SYMBOL)
     result = asyncio.run(_request({"ticks": symbol}))
