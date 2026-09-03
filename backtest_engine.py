@@ -3,8 +3,14 @@ from datetime import timedelta
 import deriv_connector as dc
 import signal_engine
 
-MONTHS_MAIN = 3
-MONTHS_M5 = 1
+MONTHS_MAIN = 1
+MONTHS_M5 = 0.5
+
+DAILY_WINDOW = 120
+H4_WINDOW = 120
+H1_WINDOW = 150
+M15_WINDOW = 150
+M5_WINDOW = 100
 
 MAX_HOLD = {
     "Swing (Daily)": timedelta(days=10),
@@ -169,13 +175,13 @@ def run_backtest(debug: bool = False) -> dict:
             h1_idx = h1_times.searchsorted(current_time, side="right")
             m5_idx = m5_times.searchsorted(current_time, side="right")
 
-            daily_slice = daily_df.iloc[:d_idx]
-            h4_slice = h4_df.iloc[:h4_idx]
-            h1_slice = h1_df.iloc[:h1_idx]
-            m15_slice = m15_df.iloc[: i + 1]
-            m5_slice = m5_df.iloc[:m5_idx] if m5_idx > 0 else None
+            daily_slice = daily_df.iloc[max(0, d_idx - DAILY_WINDOW): d_idx]
+            h4_slice = h4_df.iloc[max(0, h4_idx - H4_WINDOW): h4_idx]
+            h1_slice = h1_df.iloc[max(0, h1_idx - H1_WINDOW): h1_idx]
+            m15_slice = m15_df.iloc[max(0, i + 1 - M15_WINDOW): i + 1]
+            m5_slice = m5_df.iloc[max(0, m5_idx - M5_WINDOW): m5_idx] if m5_idx > 0 else None
 
-            if len(daily_slice) >= 10 and len(h4_slice) >= 10 and len(h1_slice) >= 10:
+            if len(daily_slice) >= 20 and len(h4_slice) >= 20 and len(h1_slice) >= 20:
                 signals = signal_engine.analyze_market_from_data(
                     daily_slice, h4_slice, h1_slice, m15_slice, m5_slice, debug=False
                 )
