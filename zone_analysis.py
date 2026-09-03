@@ -1,10 +1,3 @@
-Zone-of-interest analysis.
-Combines all sources of a "zone of interest" on a given timeframe -
-Fibonacci retracement, significant Order Blocks, and Fair Value Gaps -
-into one list. Also detects confluence (overlap) between zones found
-on different timeframes (e.g. Daily and H4), which signals a
-stronger, higher-probability area.
-"""
 import wave_analysis as wave
 import smc_analysis as smc
 
