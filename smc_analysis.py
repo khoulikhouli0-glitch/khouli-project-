@@ -146,4 +146,97 @@ def find_recent_fvg(df: pd.DataFrame, direction: str, lookback: int = 30):
 
         if direction == "bullish" and c3["low"] > c1["high"]:
             return {"top": c3["low"], "bottom": c1["high"], "time": c1["time"]}
-        if direction == "bearish" and c3["high"]
+        if direction == "bearish" and c3["high"] < c1["low"]:
+            return {"top": c1["low"], "bottom": c3["high"], "time": c1["time"]}
+
+    return None
+
+
+def price_in_zone(price: float, zone: dict, tolerance_pct: float = 0.0005) -> bool:
+    if zone is None:
+        return False
+    top = zone["top"] * (1 + tolerance_pct)
+    bottom = zone["bottom"] * (1 - tolerance_pct)
+    return bottom <= price <= top
+
+
+def find_equal_levels(df: pd.DataFrame, direction: str, lookback: int = 60, tolerance_pct: float = 0.0006):
+    recent = df.tail(lookback)
+    swings = find_swing_points(recent)
+
+    if direction == "bullish":
+        points = sorted(swings[swings["is_swing_high"]]["high"].tolist())
+    else:
+        points = sorted(swings[swings["is_swing_low"]]["low"].tolist())
+
+    if len(points) < 2:
+        return None
+
+    for a, b in zip(points, points[1:]):
+        if abs(a - b) <= a * tolerance_pct:
+            return (a + b) / 2
+
+    return None
+
+
+def find_breaker_block(df: pd.DataFrame, direction: str, lookback: int = 40):
+    opposite = "bearish" if direction == "bullish" else "bullish"
+    ob = find_last_order_block(df, direction=opposite, lookback=lookback)
+    if ob is None:
+        return None
+
+    after = df[df["time"] > ob["time"]]
+    if after.empty:
+        return None
+
+    if direction == "bullish":
+        broke = (after["close"] > ob["top"]).any()
+    else:
+        broke = (after["close"] < ob["bottom"]).any()
+
+    if not broke:
+        return None
+
+    return {"top": ob["top"], "bottom": ob["bottom"], "time": ob["time"]}
+
+
+def find_mitigation_block(df: pd.DataFrame, direction: str, lookback: int = 40):
+    recent = df.tail(lookback).reset_index(drop=True)
+
+    for i in range(len(recent) - 2, 0, -1):
+        candle = recent.iloc[i]
+        next_candle = recent.iloc[i + 1]
+
+        if direction == "bullish":
+            is_down_candle = candle["close"] < candle["open"]
+            failed_break = next_candle["low"] < candle["low"] and next_candle["close"] >= candle["low"]
+            if is_down_candle and failed_break:
+                return {"top": candle["open"], "bottom": candle["low"], "time": candle["time"]}
+        elif direction == "bearish":
+            is_up_candle = candle["close"] > candle["open"]
+            failed_break = next_candle["high"] > candle["high"] and next_candle["close"] <= candle["high"]
+            if is_up_candle and failed_break:
+                return {"top": candle["high"], "bottom": candle["open"], "time": candle["time"]}
+
+    return None
+
+
+def find_inversion_fvg(df: pd.DataFrame, direction: str, lookback: int = 40):
+    opposite = "bearish" if direction == "bullish" else "bullish"
+    fvg = find_recent_fvg(df, direction=opposite, lookback=lookback)
+    if fvg is None:
+        return None
+
+    after = df[df["time"] > fvg["time"]]
+    if after.empty:
+        return None
+
+    if direction == "bullish":
+        filled = (after["close"] > fvg["top"]).any()
+    else:
+        filled = (after["close"] < fvg["bottom"]).any()
+
+    if not filled:
+        return None
+
+    return {"top": fvg["top"], "bottom": fvg["bottom"], "time": fvg["time"]}
