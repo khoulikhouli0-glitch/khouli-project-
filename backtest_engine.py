@@ -15,7 +15,7 @@ M5_WINDOW = 100
 MAX_HOLD = {
     "Swing (Daily)": timedelta(days=10),
     "Swing (H4)": timedelta(days=5),
-    "Scalp (H1 Zone / M15 Bias)": timedelta(days=1),
+    "Scalp (H1)": timedelta(days=1),
 }
 
 
@@ -72,15 +72,11 @@ def _summarize(trades):
 
 
 def _build_report(closed_trades):
-    report = {"by_path": {}, "by_confidence": {}, "overall": {}}
+    report = {"by_path": {}, "overall": {}}
 
-    for label in ("Swing (Daily)", "Swing (H4)", "Scalp (H1 Zone / M15 Bias)"):
+    for label in ("Swing (Daily)", "Swing (H4)", "Scalp (H1)"):
         path_trades = [t for t in closed_trades if t["trade_label"] == label]
         report["by_path"][label] = _summarize(path_trades)
-
-    for conf in ("high", "low"):
-        conf_trades = [t for t in closed_trades if t["confidence"] == conf]
-        report["by_confidence"][conf] = _summarize(conf_trades)
 
     report["overall"] = _summarize(closed_trades)
     return report
@@ -94,14 +90,6 @@ def _print_report(report, closed_trades):
     for label, stats in report["by_path"].items():
         print(
             f"{label}: total={stats['total']} win={stats['wins']} loss={stats['losses']} "
-            f"expired={stats['expired']} win_rate={stats['win_rate_pct']}% "
-            f"avg_R={stats['avg_r']} total_R={stats['total_r']}"
-        )
-
-    print("\n--- By Confidence ---")
-    for conf, stats in report["by_confidence"].items():
-        print(
-            f"{conf}: total={stats['total']} win={stats['wins']} loss={stats['losses']} "
             f"expired={stats['expired']} win_rate={stats['win_rate_pct']}% "
             f"avg_R={stats['avg_r']} total_R={stats['total_r']}"
         )
@@ -149,7 +137,6 @@ def run_backtest(debug: bool = False) -> dict:
                 closed_trades.append({
                     "trade_label": label,
                     "direction": position["direction"],
-                    "confidence": position["confidence"],
                     "outcome": outcome,
                     "r_multiple": _r_multiple(position, outcome),
                     "opened_at": position["opened_at"],
@@ -160,7 +147,6 @@ def run_backtest(debug: bool = False) -> dict:
                 closed_trades.append({
                     "trade_label": label,
                     "direction": position["direction"],
-                    "confidence": position["confidence"],
                     "outcome": "expired",
                     "r_multiple": 0.0,
                     "opened_at": position["opened_at"],
@@ -193,7 +179,6 @@ def run_backtest(debug: bool = False) -> dict:
                             "entry": sig["entry"],
                             "stop_loss": sig["stop_loss"],
                             "take_profit": sig["take_profit"],
-                            "confidence": sig["confidence"],
                             "opened_at": current_time,
                             "max_hold": MAX_HOLD[label],
                         }
