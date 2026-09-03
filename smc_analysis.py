@@ -1,23 +1,7 @@
-"""
-محرك تحليل SMC (Smart Money Concepts)
-يحتوي على المنطق الأساسي:
-- تحديد السوينج بوينتس (Swing Highs/Lows)
-- تحديد هيكل السوق (BOS / CHoCH) -> التحيز
-- تحديد مناطق Premium/Discount
-- كشف Liquidity Sweep
-- كشف Order Blocks
-- كشف Fair Value Gaps (FVG)
-"""
 import pandas as pd
 
 
-# ---------- Swing Points ----------
-
 def find_swing_points(df: pd.DataFrame, left: int = 3, right: int = 3):
-    """
-    يحدد نقاط السوينج (قمم وقيعان محلية) بمقارنة كل شمعة بجيرانها.
-    يرجع df فيه أعمدة إضافية: is_swing_high, is_swing_low
-    """
     df = df.copy()
     df["is_swing_high"] = False
     df["is_swing_low"] = False
@@ -34,15 +18,7 @@ def find_swing_points(df: pd.DataFrame, left: int = 3, right: int = 3):
     return df
 
 
-# ---------- Market Structure: BOS / CHoCH ----------
-
 def detect_structure(df: pd.DataFrame) -> dict:
-    """
-    يحدد اتجاه الهيكل الحالي بناءً على آخر سوينجات:
-    - BOS (Break of Structure): كسر في اتجاه الترند الحالي -> تأكيد استمرار
-    - CHoCH (Change of Character): كسر عكس الترند الحالي -> احتمال انعكاس
-    يرجع dict فيه: trend ("bullish"/"bearish"/"unclear"), last_event, level
-    """
     swings = find_swing_points(df)
     highs = swings[swings["is_swing_high"]][["time", "high"]].tail(4)
     lows = swings[swings["is_swing_low"]][["time", "low"]].tail(4)
@@ -56,7 +32,6 @@ def detect_structure(df: pd.DataFrame) -> dict:
     last_low = lows["low"].iloc[-1]
     prev_low = lows["low"].iloc[-2]
 
-    # ترند صاعد: قمم وقيعان أعلى من سابقتها
     bullish_structure = last_high > prev_high and last_low > prev_low
     bearish_structure = last_high < prev_high and last_low < prev_low
 
@@ -75,7 +50,6 @@ def detect_structure(df: pd.DataFrame) -> dict:
             last_event = "BOS"
             level = last_low
     else:
-        # هيكل غير واضح - نفحص هل حصل CHoCH
         if last_close > prev_high:
             trend = "bullish"
             last_event = "CHoCH"
@@ -88,13 +62,7 @@ def detect_structure(df: pd.DataFrame) -> dict:
     return {"trend": trend, "last_event": last_event, "level": level}
 
 
-# ---------- Premium / Discount Zones ----------
-
 def get_premium_discount_zone(df: pd.DataFrame, lookback: int = 50) -> dict:
-    """
-    يحدد الرينج الحالي (أعلى قمة / أقل قاع في آخر lookback شمعة)
-    ويحسب هل السعر الحالي في منطقة Premium (فوق 50%) أو Discount (تحت 50%)
-    """
     recent = df.tail(lookback)
     range_high = recent["high"].max()
     range_low = recent["low"].min()
@@ -112,39 +80,29 @@ def get_premium_discount_zone(df: pd.DataFrame, lookback: int = 50) -> dict:
     }
 
 
-# ---------- Liquidity Sweep ----------
+def detect_liquidity_sweep(df: pd.DataFrame, lookback: int = 20, check_last: int = 4) -> dict:
+    for i in range(1, check_last + 1):
+        candle = df.iloc[-i]
+        recent = df.iloc[max(0, len(df) - lookback - i): len(df) - i]
 
-def detect_liquidity_sweep(df: pd.DataFrame, lookback: int = 20) -> dict:
-    """
-    يكشف هل آخر شمعة (أو الشمعتين الأخيرتين) عملت سويب لسيولة
-    (كسرت قمة/قاع سابق بالفتيل ورجعت تقفل جواه) - دليل على جمع سيولة.
-    """
-    recent = df.iloc[-(lookback + 2) : -1]
-    last_candle = df.iloc[-1]
+        if len(recent) == 0:
+            continue
 
-    prior_high = recent["high"].max()
-    prior_low = recent["low"].min()
+        prior_high = recent["high"].max()
+        prior_low = recent["low"].min()
 
-    swept_high = last_candle["high"] > prior_high and last_candle["close"] < prior_high
-    swept_low = last_candle["low"] < prior_low and last_candle["close"] > prior_low
+        swept_high = candle["high"] > prior_high and candle["close"] < prior_high
+        swept_low = candle["low"] < prior_low and candle["close"] > prior_low
 
-    if swept_high:
-        return {"swept": True, "direction": "sell_side_taken", "level": prior_high}
-    if swept_low:
-        return {"swept": True, "direction": "buy_side_taken", "level": prior_low}
+        if swept_high:
+            return {"swept": True, "direction": "sell_side_taken", "level": prior_high}
+        if swept_low:
+            return {"swept": True, "direction": "buy_side_taken", "level": prior_low}
 
     return {"swept": False, "direction": None, "level": None}
 
 
-# ---------- Order Blocks ----------
-
 def find_last_order_block(df: pd.DataFrame, direction: str, lookback: int = 30):
-    """
-    يحدد آخر Order Block صالح:
-    - Bullish OB: آخر شمعة هابطة قبل حركة صاعدة قوية (impulsive move)
-    - Bearish OB: آخر شمعة صاعدة قبل حركة هابطة قوية
-    direction: "bullish" أو "bearish" (اتجاه الـ OB المطلوب البحث عنه)
-    """
     recent = df.tail(lookback).reset_index(drop=True)
     avg_range = (recent["high"] - recent["low"]).mean()
 
@@ -179,14 +137,7 @@ def find_last_order_block(df: pd.DataFrame, direction: str, lookback: int = 30):
     return None
 
 
-# ---------- Fair Value Gaps ----------
-
 def find_recent_fvg(df: pd.DataFrame, direction: str, lookback: int = 30):
-    """
-    يكشف آخر Fair Value Gap (فجوة سعرية بين شمعة 1 و 3 لم تُملأ):
-    - Bullish FVG: low الشمعة الثالثة > high الشمعة الأولى
-    - Bearish FVG: high الشمعة الثالثة < low الشمعة الأولى
-    """
     recent = df.tail(lookback).reset_index(drop=True)
 
     for i in range(len(recent) - 3, 0, -1):
@@ -201,10 +152,7 @@ def find_recent_fvg(df: pd.DataFrame, direction: str, lookback: int = 30):
     return None
 
 
-# ---------- Price inside zone check ----------
-
 def price_in_zone(price: float, zone: dict, tolerance_pct: float = 0.0005) -> bool:
-    """يفحص هل السعر الحالي داخل منطقة (OB أو FVG) مع هامش صغير."""
     if zone is None:
         return False
     top = zone["top"] * (1 + tolerance_pct)
