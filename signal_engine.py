@@ -13,6 +13,10 @@ CONFIRM_MAX_WAIT = 6
 MIN_RR = 1.5
 ENTRY_TOLERANCE = 0.0008
 PD_LOOKBACK = 50
+DISPLACEMENT_STD_LOOKBACK = 20
+DISPLACEMENT_STD_MULT = 3.0
+LONDON_KILLZONE = (7, 10)
+NY_KILLZONE = (12, 15)
 
 
 def _level_still_respected(df, level_idx, level, direction):
@@ -24,6 +28,32 @@ def _level_still_respected(df, level_idx, level, direction):
     else:
         violated = (after["close"] > level).any()
     return not violated
+
+
+def _in_killzone(candle_time) -> bool:
+    hour = candle_time.hour
+    in_london = LONDON_KILLZONE[0] <= hour < LONDON_KILLZONE[1]
+    in_ny = NY_KILLZONE[0] <= hour < NY_KILLZONE[1]
+    return in_london or in_ny
+
+
+def _measure_displacement(df, start_idx, end_idx):
+    closes = df["close"]
+    pct_changes = closes.pct_change().dropna()
+    window = pct_changes.iloc[max(0, start_idx - DISPLACEMENT_STD_LOOKBACK): start_idx]
+    if len(window) < 5:
+        return False, 0.0
+
+    std = window.std()
+    if std == 0 or pd.isna(std):
+        return False, 0.0
+
+    start_price = float(closes.iloc[start_idx])
+    end_price = float(closes.iloc[end_idx])
+    move_pct = abs(end_price - start_price) / start_price
+    strength = move_pct / std if std > 0 else 0.0
+
+    return strength >= DISPLACEMENT_STD_MULT, round(strength, 2)
 
 
 def _get_bias(bias_df):
@@ -136,7 +166,15 @@ def _find_trigger(zone_df, bc, liq, direction, max_wait):
         confirm_index = int(broken_idx) if pd.notna(broken_idx) else i
 
         if is_bos:
-            return {"event": "BOS (continuation)", "confirm_index": confirm_index}
+            disp_start = max(0, i - 3)
+            disp_ok, disp_strength = _measure_displacement(zone_df, disp_start, confirm_index)
+            if not disp_ok:
+                continue
+            return {
+                "event": "BOS (continuation)",
+                "confirm_index": confirm_index,
+                "displacement_strength": disp_strength,
+            }
 
         opposite_liq = -wanted
         window_start = max(0, confirm_index - max_wait)
@@ -149,7 +187,16 @@ def _find_trigger(zone_df, bc, liq, direction, max_wait):
         if swept.empty:
             continue
 
-        return {"event": "Sweep then CHoCH", "confirm_index": confirm_index}
+        sweep_index = int(swept.iloc[-1]["Swept"])
+        disp_ok, disp_strength = _measure_displacement(zone_df, sweep_index, confirm_index)
+        if not disp_ok:
+            continue
+
+        return {
+            "event": "Sweep then CHoCH",
+            "confirm_index": confirm_index,
+            "displacement_strength": disp_strength,
+        }
 
     return None
 
@@ -189,13 +236,15 @@ def _find_entry(ob, fvg, ret, direction, current_price):
 
 
 def _build_reason(path_label, bias_label, direction_word, liquidity_source, confirm_event,
-                   entry_array_name, entry_zone, target_price, pd_zone, broken_level, stop_loss, break_age):
+                   entry_array_name, entry_zone, target_price, pd_zone, broken_level, stop_loss,
+                   break_age, displacement_strength, killzone_note):
     return (
         f"Type: {path_label}\n"
         f"Bias: {direction_word} (on {bias_label})\n"
         f"Premium/Discount: {pd_zone}\n"
         f"Liquidity target: {liquidity_source} @ {round(target_price, 2)}\n"
-        f"Trigger: {confirm_event}\n"
+        f"Trigger: {confirm_event} (displacement {displacement_strength}x std)\n"
+        f"Timing: {killzone_note}\n"
         f"Entry array: {entry_array_name}\n"
         f"Entry zone: {round(entry_zone['bottom'], 2)} - {round(entry_zone['top'], 2)}\n"
         f"Broken structure level ({bias_label}, {break_age} candles ago, still respected): {round(broken_level, 2)}\n"
@@ -217,7 +266,7 @@ def _process_path(bias_df, bias_label, zone_df, entry_df, path_label, daily_df=N
 
     trigger = _find_trigger(zone_df, bc, liq, direction_word, CONFIRM_MAX_WAIT)
     if trigger is None:
-        return None, f"{path_label}: skipped - no respected matching BOS/CHoCH trigger on zone timeframe"
+        return None, f"{path_label}: skipped - no respected trigger with sufficient displacement"
 
     bias_current_price = float(bias_df["close"].iloc[-1])
     liquidity_price, liquidity_source = _liquidity_target(
@@ -251,9 +300,23 @@ def _process_path(bias_df, bias_label, zone_df, entry_df, path_label, daily_df=N
 
     take_profit = liquidity_price
 
+    entry_time = entry_df["time"].iloc[-1]
+    in_kz = _in_killzone(entry_time)
+    killzone_note = "Inside London/NY killzone" if in_kz else "Outside killzone (still valid)"
+
+    if daily_df is not None:
+        pass
+
+    confidence = "high" if in_kz else "standard"
+    confidence_label = (
+        "منهج SMC كامل - داخل جلسة لندن/نيويورك" if in_kz
+        else "منهج SMC كامل - خارج جلسة لندن/نيويورك (لا يزال صالحًا)"
+    )
+
     reason = _build_reason(
         path_label, bias_label, direction_word, liquidity_source, trigger["event"],
-        entry_array_name, entry_zone, take_profit, pd_zone, bias_level, stop_loss, break_age,
+        entry_array_name, entry_zone, take_profit, pd_zone, bias_level, stop_loss,
+        break_age, trigger["displacement_strength"], killzone_note,
     )
 
     signal = {
@@ -264,11 +327,11 @@ def _process_path(bias_df, bias_label, zone_df, entry_df, path_label, daily_df=N
         "take_profit": round(take_profit, 2),
         "reason": reason,
         "trade_label": path_label,
-        "confidence": "high",
-        "confidence_label": "منهج SMC عبر مكتبة smartmoneyconcepts (multi-timeframe)",
+        "confidence": confidence,
+        "confidence_label": confidence_label,
         "timestamp": datetime.now(),
     }
-    return signal, f"{path_label}: SIGNAL {direction} @ {entry_price} via {entry_array_name} ({trigger['event']})"
+    return signal, f"{path_label}: SIGNAL {direction} @ {entry_price} via {entry_array_name} ({trigger['event']}, {killzone_note})"
 
 
 def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool = False) -> list:
