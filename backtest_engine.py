@@ -1,4 +1,5 @@
 from datetime import timedelta
+from collections import Counter
 
 import deriv_connector as dc
 import signal_engine
@@ -82,7 +83,7 @@ def _build_report(closed_trades):
     return report
 
 
-def _print_report(report, closed_trades):
+def _print_report(report, closed_trades, skip_reasons):
     print("\n========== BACKTEST REPORT ==========")
     print(f"Total closed trades: {len(closed_trades)}")
 
@@ -100,7 +101,34 @@ def _print_report(report, closed_trades):
         f"total={o['total']} win={o['wins']} loss={o['losses']} expired={o['expired']} "
         f"win_rate={o['win_rate_pct']}% avg_R={o['avg_r']} total_R={o['total_r']}"
     )
+
+    print("\n--- Skip Reason Tally (why no signal fired) ---")
+    for path_label, counter in skip_reasons.items():
+        print(f"\n{path_label}:")
+        for reason, count in counter.most_common():
+            print(f"  {count:6d}  {reason}")
+
     print("======================================\n")
+
+
+def _classify_skip(msg: str) -> str:
+    if "no respected BOS/CHoCH bias" in msg:
+        return "no bias"
+    if "price in" in msg and "zone, need" in msg:
+        return "premium/discount mismatch"
+    if "no respected trigger" in msg or "no respected matching" in msg:
+        return "no fresh trigger (BOS/CHoCH)"
+    if "no liquidity target" in msg:
+        return "no liquidity target"
+    if "not in any entry array" in msg:
+        return "price not in entry array (OB/FVG/OTE)"
+    if "stop already invalidated" in msg:
+        return "stop invalidated"
+    if "R:R" in msg and "below minimum" in msg:
+        return "R:R below minimum"
+    if "SIGNAL" in msg:
+        return "SIGNAL GENERATED"
+    return "other/unrecognized"
 
 
 def run_backtest(debug: bool = False) -> dict:
@@ -119,7 +147,14 @@ def run_backtest(debug: bool = False) -> dict:
 
     open_positions = {}
     closed_trades = []
+    skip_reasons = {
+        "Swing (Daily)": Counter(),
+        "Swing (H4)": Counter(),
+        "Scalp (H1)": Counter(),
+    }
     total_steps = len(m15_df)
+
+    original_log_capture = []
 
     for i in range(total_steps):
         current_row = m15_df.iloc[i]
@@ -168,9 +203,30 @@ def run_backtest(debug: bool = False) -> dict:
             m5_slice = m5_df.iloc[max(0, m5_idx - M5_WINDOW): m5_idx] if m5_idx > 0 else None
 
             if len(daily_slice) >= 20 and len(h4_slice) >= 20 and len(h1_slice) >= 20:
+                captured = []
+
+                def capture_log(msg, _store=captured):
+                    _store.append(msg)
+
+                orig_process = signal_engine._process_path
+
+                def wrapped_process(*args, **kwargs):
+                    sig, msg = orig_process(*args, **kwargs)
+                    capture_log(msg)
+                    return sig, msg
+
+                signal_engine._process_path = wrapped_process
                 signals = signal_engine.analyze_market_from_data(
                     daily_slice, h4_slice, h1_slice, m15_slice, m5_slice, debug=False
                 )
+                signal_engine._process_path = orig_process
+
+                path_order = ["Swing (Daily)", "Swing (H4)", "Scalp (H1)"]
+                for idx, msg in enumerate(captured):
+                    if idx < len(path_order):
+                        label = path_order[idx]
+                        skip_reasons[label][_classify_skip(msg)] += 1
+
                 for sig in signals:
                     label = sig["trade_label"]
                     if open_positions.get(label) is None:
@@ -187,5 +243,5 @@ def run_backtest(debug: bool = False) -> dict:
             print(f"[Backtest] step {i}/{total_steps}  time={current_time}")
 
     report = _build_report(closed_trades)
-    _print_report(report, closed_trades)
+    _print_report(report, closed_trades, skip_reasons)
     return report
