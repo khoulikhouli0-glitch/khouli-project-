@@ -199,3 +199,112 @@ def _build_reason(path_label, bias_label, direction_word, liquidity_source, conf
         f"Entry array: {entry_array_name}\n"
         f"Entry zone: {round(entry_zone['bottom'], 2)} - {round(entry_zone['top'], 2)}\n"
         f"Broken structure level ({bias_label}, {break_age} candles ago, still respected): {round(broken_level, 2)}\n"
+        f"Stop basis: Behind that level, at {round(stop_loss, 2)}"
+    )
+
+
+def _process_path(bias_df, bias_label, zone_df, entry_df, path_label, daily_df=None):
+    direction_word, sw_bias, bc_bias, bias_level, bias_event, break_age = _get_bias(bias_df)
+    if direction_word is None:
+        return None, f"{path_label}: skipped - no respected BOS/CHoCH bias found"
+
+    pd_zone = _premium_discount_zone(zone_df)
+    wanted_zone = "discount" if direction_word == "bullish" else "premium"
+    if pd_zone != wanted_zone:
+        return None, f"{path_label}: skipped - price in {pd_zone} zone, need {wanted_zone}"
+
+    sw, bc, liq, ob, fvg, ret = _analyze_zone(zone_df)
+
+    trigger = _find_trigger(zone_df, bc, liq, direction_word, CONFIRM_MAX_WAIT)
+    if trigger is None:
+        return None, f"{path_label}: skipped - no respected matching BOS/CHoCH trigger on zone timeframe"
+
+    bias_current_price = float(bias_df["close"].iloc[-1])
+    liquidity_price, liquidity_source = _liquidity_target(
+        bias_df, sw_bias, direction_word, bias_current_price, daily_df
+    )
+    if liquidity_price is None:
+        return None, f"{path_label}: skipped - no liquidity target found"
+
+    current_price = float(entry_df["close"].iloc[-1])
+    entry_array_name, entry_zone, entry_price = _find_entry(ob, fvg, ret, direction_word, current_price)
+    if entry_zone is None:
+        return None, f"{path_label}: skipped - price not in any entry array (OB/FVG/OTE)"
+
+    direction = "BUY" if direction_word == "bullish" else "SELL"
+
+    if direction == "BUY":
+        stop_loss = bias_level * 0.9993
+    else:
+        stop_loss = bias_level * 1.0007
+
+    if direction == "BUY" and entry_price <= stop_loss:
+        return None, f"{path_label}: skipped - stop already invalidated"
+    if direction == "SELL" and entry_price >= stop_loss:
+        return None, f"{path_label}: skipped - stop already invalidated"
+
+    risk = abs(entry_price - stop_loss)
+    reward = abs(liquidity_price - entry_price)
+    rr = reward / risk if risk > 0 else 0
+    if rr < MIN_RR:
+        return None, f"{path_label}: skipped - R:R {round(rr, 2)} below minimum {MIN_RR}"
+
+    take_profit = liquidity_price
+
+    reason = _build_reason(
+        path_label, bias_label, direction_word, liquidity_source, trigger["event"],
+        entry_array_name, entry_zone, take_profit, pd_zone, bias_level, stop_loss, break_age,
+    )
+
+    signal = {
+        "symbol": Config.SYMBOL,
+        "direction": direction,
+        "entry": round(entry_price, 2),
+        "stop_loss": round(stop_loss, 2),
+        "take_profit": round(take_profit, 2),
+        "reason": reason,
+        "trade_label": path_label,
+        "confidence": "high",
+        "confidence_label": "منهج SMC عبر مكتبة smartmoneyconcepts (multi-timeframe)",
+        "timestamp": datetime.now(),
+    }
+    return signal, f"{path_label}: SIGNAL {direction} @ {entry_price} via {entry_array_name} ({trigger['event']})"
+
+
+def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool = False) -> list:
+    def log(msg):
+        if debug:
+            print(f"[DEBUG] {msg}")
+
+    signals = []
+
+    sig, msg = _process_path(daily_df, "Daily", h4_df, m15_df, "Swing (Daily)", daily_df=None)
+    log(msg)
+    if sig:
+        signals.append(sig)
+
+    sig, msg = _process_path(h4_df, "H4", h1_df, m15_df, "Swing (H4)", daily_df=daily_df)
+    log(msg)
+    if sig:
+        signals.append(sig)
+
+    if m5_df is not None:
+        sig, msg = _process_path(h1_df, "H1", m15_df, m5_df, "Scalp (H1)", daily_df=daily_df)
+        log(msg)
+        if sig:
+            signals.append(sig)
+
+    if not signals:
+        log("No trade opportunity found on any path (Swing-Daily, Swing-H4, Scalp)")
+
+    return signals
+
+
+def analyze_market(debug: bool = False) -> list:
+    daily_df = dc.get_candles("D1", count=120)
+    h4_df = dc.get_candles("H4", count=120)
+    h1_df = dc.get_candles("H1", count=150)
+    m15_df = dc.get_candles("M15", count=150)
+    m5_df = dc.get_candles("M5", count=100)
+
+    return analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug=debug)
