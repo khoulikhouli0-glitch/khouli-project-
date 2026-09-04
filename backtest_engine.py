@@ -154,8 +154,6 @@ def run_backtest(debug: bool = False) -> dict:
     }
     total_steps = len(m15_df)
 
-    original_log_capture = []
-
     for i in range(total_steps):
         current_row = m15_df.iloc[i]
         current_time = current_row["time"]
@@ -196,23 +194,22 @@ def run_backtest(debug: bool = False) -> dict:
             h1_idx = h1_times.searchsorted(current_time, side="right")
             m5_idx = m5_times.searchsorted(current_time, side="right")
 
-            daily_slice = daily_df.iloc[max(0, d_idx - DAILY_WINDOW): d_idx]
-            h4_slice = h4_df.iloc[max(0, h4_idx - H4_WINDOW): h4_idx]
-            h1_slice = h1_df.iloc[max(0, h1_idx - H1_WINDOW): h1_idx]
-            m15_slice = m15_df.iloc[max(0, i + 1 - M15_WINDOW): i + 1]
-            m5_slice = m5_df.iloc[max(0, m5_idx - M5_WINDOW): m5_idx] if m5_idx > 0 else None
+            daily_slice = daily_df.iloc[max(0, d_idx - DAILY_WINDOW): d_idx].reset_index(drop=True)
+            h4_slice = h4_df.iloc[max(0, h4_idx - H4_WINDOW): h4_idx].reset_index(drop=True)
+            h1_slice = h1_df.iloc[max(0, h1_idx - H1_WINDOW): h1_idx].reset_index(drop=True)
+            m15_slice = m15_df.iloc[max(0, i + 1 - M15_WINDOW): i + 1].reset_index(drop=True)
+            m5_slice = (
+                m5_df.iloc[max(0, m5_idx - M5_WINDOW): m5_idx].reset_index(drop=True)
+                if m5_idx > 0 else None
+            )
 
             if len(daily_slice) >= 20 and len(h4_slice) >= 20 and len(h1_slice) >= 20:
                 captured = []
-
-                def capture_log(msg, _store=captured):
-                    _store.append(msg)
-
                 orig_process = signal_engine._process_path
 
                 def wrapped_process(*args, **kwargs):
                     sig, msg = orig_process(*args, **kwargs)
-                    capture_log(msg)
+                    captured.append(msg)
                     return sig, msg
 
                 signal_engine._process_path = wrapped_process
