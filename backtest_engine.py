@@ -209,19 +209,30 @@ def run_backtest(debug: bool = False) -> dict:
                 if not diagnostic_done:
                     diagnostic_done = True
                     from smartmoneyconcepts import smc as _smc_diag
-                    print("\n===== ONE-TIME DIAGNOSTIC (Daily slice) =====")
-                    print(f"daily_slice len={len(daily_slice)}  columns={list(daily_slice.columns)}")
-                    print(f"daily_slice index type={type(daily_slice.index)}  first idx={daily_slice.index[0]}  last idx={daily_slice.index[-1]}")
-                    try:
-                        sw_diag = _smc_diag.swing_highs_lows(daily_slice, swing_length=signal_engine.BIAS_SWING_LENGTH)
-                        print(f"swing_highs_lows OK. non-null HighLow count = {sw_diag['HighLow'].notna().sum()}")
-                        bc_diag = _smc_diag.bos_choch(daily_slice, sw_diag, close_break=True)
-                        print(f"bos_choch OK. non-null BOS = {bc_diag['BOS'].notna().sum()}  non-null CHOCH = {bc_diag['CHOCH'].notna().sum()}")
-                        print(f"BOS nonzero values: {bc_diag['BOS'].dropna().unique().tolist()}")
-                        print(f"CHOCH nonzero values: {bc_diag['CHOCH'].dropna().unique().tolist()}")
-                    except Exception as e:
-                        print(f"EXCEPTION during diagnostic: {type(e).__name__}: {e}")
-                    print("===== END DIAGNOSTIC =====\n")
+                    print("\n===== ONE-TIME DIAGNOSTIC v2 (Daily slice, per-candidate) =====")
+                    sw_diag = _smc_diag.swing_highs_lows(daily_slice, swing_length=signal_engine.BIAS_SWING_LENGTH)
+                    bc_diag = _smc_diag.bos_choch(daily_slice, sw_diag, close_break=True)
+                    n_diag = len(bc_diag)
+                    print(f"n={n_diag}")
+                    checked = 0
+                    for j in range(n_diag - 1, -1, -1):
+                        bos_v = bc_diag["BOS"].iloc[j]
+                        choch_v = bc_diag["CHOCH"].iloc[j]
+                        import pandas as _pd
+                        is_bos_v = _pd.notna(bos_v) and bos_v != 0
+                        is_choch_v = _pd.notna(choch_v) and choch_v != 0
+                        if not (is_bos_v or is_choch_v):
+                            continue
+                        checked += 1
+                        level_v = float(bc_diag["Level"].iloc[j])
+                        direction_v = "bullish" if (bos_v == 1 if is_bos_v else choch_v == 1) else "bearish"
+                        respected = signal_engine._level_still_respected(daily_slice, j, level_v, direction_v)
+                        event_v = "BOS" if is_bos_v else "CHOCH"
+                        print(f"  candidate #{checked}: row_idx={j}  event={event_v}  direction={direction_v}  level={level_v:.2f}  respected={respected}")
+                        if checked >= 10:
+                            break
+                    print(f"Total candidates found (up to 10 shown): {checked}")
+                    print("===== END DIAGNOSTIC v2 =====\n")
 
                 captured = []
                 orig_process = signal_engine._process_path
