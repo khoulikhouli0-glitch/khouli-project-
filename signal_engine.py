@@ -19,17 +19,6 @@ LONDON_KILLZONE = (7, 10)
 NY_KILLZONE = (12, 15)
 
 
-def _level_still_respected(df, level_idx, level, direction):
-    after = df.iloc[level_idx + 1:]
-    if len(after) == 0:
-        return True
-    if direction == "bullish":
-        violated = (after["close"] < level).any()
-    else:
-        violated = (after["close"] > level).any()
-    return not violated
-
-
 def _in_killzone(candle_time) -> bool:
     hour = candle_time.hour
     in_london = LONDON_KILLZONE[0] <= hour < LONDON_KILLZONE[1]
@@ -72,10 +61,6 @@ def _get_bias(bias_df):
 
         level = float(bc["Level"].iloc[i])
         direction = "bullish" if (bos == 1 if is_bos else choch == 1) else "bearish"
-
-        if not _level_still_respected(bias_df, i, level, direction):
-            continue
-
         event = "BOS" if is_bos else "CHoCH"
         age = (n - 1) - i
         return direction, sw, bc, level, event, age
@@ -156,10 +141,6 @@ def _find_trigger(zone_df, bc, liq, direction, max_wait):
         is_bos = pd.notna(bos) and bos == wanted
         is_choch = pd.notna(choch) and choch == wanted
         if not (is_bos or is_choch):
-            continue
-
-        level = float(bc["Level"].iloc[i])
-        if not _level_still_respected(zone_df, i, level, direction):
             continue
 
         broken_idx = bc["BrokenIndex"].iloc[i]
@@ -247,7 +228,7 @@ def _build_reason(path_label, bias_label, direction_word, liquidity_source, conf
         f"Timing: {killzone_note}\n"
         f"Entry array: {entry_array_name}\n"
         f"Entry zone: {round(entry_zone['bottom'], 2)} - {round(entry_zone['top'], 2)}\n"
-        f"Broken structure level ({bias_label}, {break_age} candles ago, still respected): {round(broken_level, 2)}\n"
+        f"Broken structure level ({bias_label}, {break_age} candles ago): {round(broken_level, 2)}\n"
         f"Stop basis: Behind that level, at {round(stop_loss, 2)}"
     )
 
@@ -255,7 +236,7 @@ def _build_reason(path_label, bias_label, direction_word, liquidity_source, conf
 def _process_path(bias_df, bias_label, zone_df, entry_df, path_label, daily_df=None):
     direction_word, sw_bias, bc_bias, bias_level, bias_event, break_age = _get_bias(bias_df)
     if direction_word is None:
-        return None, f"{path_label}: skipped - no respected BOS/CHoCH bias found"
+        return None, f"{path_label}: skipped - no BOS/CHoCH bias found"
 
     pd_zone = _premium_discount_zone(zone_df)
     wanted_zone = "discount" if direction_word == "bullish" else "premium"
@@ -266,7 +247,7 @@ def _process_path(bias_df, bias_label, zone_df, entry_df, path_label, daily_df=N
 
     trigger = _find_trigger(zone_df, bc, liq, direction_word, CONFIRM_MAX_WAIT)
     if trigger is None:
-        return None, f"{path_label}: skipped - no respected trigger with sufficient displacement"
+        return None, f"{path_label}: skipped - no trigger with sufficient displacement"
 
     bias_current_price = float(bias_df["close"].iloc[-1])
     liquidity_price, liquidity_source = _liquidity_target(
@@ -304,9 +285,6 @@ def _process_path(bias_df, bias_label, zone_df, entry_df, path_label, daily_df=N
     in_kz = _in_killzone(entry_time)
     killzone_note = "Inside London/NY killzone" if in_kz else "Outside killzone (still valid)"
 
-    if daily_df is not None:
-        pass
-
     confidence = "high" if in_kz else "standard"
     confidence_label = (
         "منهج SMC كامل - داخل جلسة لندن/نيويورك" if in_kz
@@ -315,59 +293,4 @@ def _process_path(bias_df, bias_label, zone_df, entry_df, path_label, daily_df=N
 
     reason = _build_reason(
         path_label, bias_label, direction_word, liquidity_source, trigger["event"],
-        entry_array_name, entry_zone, take_profit, pd_zone, bias_level, stop_loss,
-        break_age, trigger["displacement_strength"], killzone_note,
-    )
-
-    signal = {
-        "symbol": Config.SYMBOL,
-        "direction": direction,
-        "entry": round(entry_price, 2),
-        "stop_loss": round(stop_loss, 2),
-        "take_profit": round(take_profit, 2),
-        "reason": reason,
-        "trade_label": path_label,
-        "confidence": confidence,
-        "confidence_label": confidence_label,
-        "timestamp": datetime.now(),
-    }
-    return signal, f"{path_label}: SIGNAL {direction} @ {entry_price} via {entry_array_name} ({trigger['event']}, {killzone_note})"
-
-
-def analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug: bool = False) -> list:
-    def log(msg):
-        if debug:
-            print(f"[DEBUG] {msg}")
-
-    signals = []
-
-    sig, msg = _process_path(daily_df, "Daily", h4_df, m15_df, "Swing (Daily)", daily_df=None)
-    log(msg)
-    if sig:
-        signals.append(sig)
-
-    sig, msg = _process_path(h4_df, "H4", h1_df, m15_df, "Swing (H4)", daily_df=daily_df)
-    log(msg)
-    if sig:
-        signals.append(sig)
-
-    if m5_df is not None:
-        sig, msg = _process_path(h1_df, "H1", m15_df, m5_df, "Scalp (H1)", daily_df=daily_df)
-        log(msg)
-        if sig:
-            signals.append(sig)
-
-    if not signals:
-        log("No trade opportunity found on any path (Swing-Daily, Swing-H4, Scalp)")
-
-    return signals
-
-
-def analyze_market(debug: bool = False) -> list:
-    daily_df = dc.get_candles("D1", count=120)
-    h4_df = dc.get_candles("H4", count=120)
-    h1_df = dc.get_candles("H1", count=150)
-    m15_df = dc.get_candles("M15", count=150)
-    m5_df = dc.get_candles("M5", count=100)
-
-    return analyze_market_from_data(daily_df, h4_df, h1_df, m15_df, m5_df, debug=debug)
+        entry_array_name, entry_zone,
