@@ -6,15 +6,11 @@ from smartmoneyconcepts import smc
 import deriv_connector as dc
 from config import Config
 
-BIAS_SWING_LENGTH = 5
-ZONE_SWING_LENGTH = 3
+SWING_LENGTH = 3
 LIQUIDITY_RANGE_PCT = 0.01
 CONFIRM_MAX_WAIT = 6
 MIN_RR = 1.5
 ENTRY_TOLERANCE = 0.0008
-PD_LOOKBACK = 50
-DISPLACEMENT_STD_LOOKBACK = 20
-DISPLACEMENT_STD_MULT = 3.0
 LONDON_KILLZONE = (7, 10)
 NY_KILLZONE = (12, 15)
 
@@ -26,27 +22,8 @@ def _in_killzone(candle_time) -> bool:
     return in_london or in_ny
 
 
-def _measure_displacement(df, start_idx, end_idx):
-    closes = df["close"]
-    pct_changes = closes.pct_change().dropna()
-    window = pct_changes.iloc[max(0, start_idx - DISPLACEMENT_STD_LOOKBACK): start_idx]
-    if len(window) < 5:
-        return False, 0.0
-
-    std = window.std()
-    if std == 0 or pd.isna(std):
-        return False, 0.0
-
-    start_price = float(closes.iloc[start_idx])
-    end_price = float(closes.iloc[end_idx])
-    move_pct = abs(end_price - start_price) / start_price
-    strength = move_pct / std if std > 0 else 0.0
-
-    return strength >= DISPLACEMENT_STD_MULT, round(strength, 2)
-
-
 def _get_bias(bias_df):
-    sw = smc.swing_highs_lows(bias_df, swing_length=BIAS_SWING_LENGTH)
+    sw = smc.swing_highs_lows(bias_df, swing_length=SWING_LENGTH)
     bc = smc.bos_choch(bias_df, sw, close_break=True)
     n = len(bc)
 
@@ -68,12 +45,19 @@ def _get_bias(bias_df):
     return None, sw, bc, None, None, None
 
 
-def _premium_discount_zone(zone_df, lookback=PD_LOOKBACK):
-    recent = zone_df.tail(lookback)
-    range_high = float(recent["high"].max())
-    range_low = float(recent["low"].min())
-    midpoint = (range_high + range_low) / 2
-    current_price = float(zone_df["close"].iloc[-1])
+def _premium_discount_from_swing(df, sw):
+    highs = sw[sw["HighLow"] == 1]["Level"]
+    lows = sw[sw["HighLow"] == -1]["Level"]
+    if highs.empty or lows.empty:
+        return None
+
+    last_high = float(highs.iloc[-1])
+    last_low = float(lows.iloc[-1])
+    top = max(last_high, last_low)
+    bottom = min(last_high, last_low)
+    midpoint = (top + bottom) / 2
+    current_price = float(df["close"].iloc[-1])
+
     return "premium" if current_price > midpoint else "discount"
 
 
@@ -121,7 +105,7 @@ def _liquidity_target(bias_df, sw_bias, direction, current_price, daily_df):
 
 
 def _analyze_zone(zone_df):
-    sw = smc.swing_highs_lows(zone_df, swing_length=ZONE_SWING_LENGTH)
+    sw = smc.swing_highs_lows(zone_df, swing_length=SWING_LENGTH)
     bc = smc.bos_choch(zone_df, sw, close_break=True)
     liq = smc.liquidity(zone_df, sw, range_percent=LIQUIDITY_RANGE_PCT)
     ob = smc.ob(zone_df, sw, close_mitigation=False)
@@ -130,7 +114,7 @@ def _analyze_zone(zone_df):
     return sw, bc, liq, ob, fvg, ret
 
 
-def _find_trigger(zone_df, bc, liq, direction, max_wait):
+def _find_trigger(bc, liq, direction, max_wait):
     wanted = 1 if direction == "bullish" else -1
     n = len(bc)
 
@@ -147,15 +131,7 @@ def _find_trigger(zone_df, bc, liq, direction, max_wait):
         confirm_index = int(broken_idx) if pd.notna(broken_idx) else i
 
         if is_bos:
-            disp_start = max(0, i - 3)
-            disp_ok, disp_strength = _measure_displacement(zone_df, disp_start, confirm_index)
-            if not disp_ok:
-                continue
-            return {
-                "event": "BOS (continuation)",
-                "confirm_index": confirm_index,
-                "displacement_strength": disp_strength,
-            }
+            return {"event": "BOS (continuation)", "confirm_index": confirm_index}
 
         opposite_liq = -wanted
         window_start = max(0, confirm_index - max_wait)
@@ -168,16 +144,7 @@ def _find_trigger(zone_df, bc, liq, direction, max_wait):
         if swept.empty:
             continue
 
-        sweep_index = int(swept.iloc[-1]["Swept"])
-        disp_ok, disp_strength = _measure_displacement(zone_df, sweep_index, confirm_index)
-        if not disp_ok:
-            continue
-
-        return {
-            "event": "Sweep then CHoCH",
-            "confirm_index": confirm_index,
-            "displacement_strength": disp_strength,
-        }
+        return {"event": "Sweep then CHoCH", "confirm_index": confirm_index}
 
     return None
 
@@ -217,14 +184,15 @@ def _find_entry(ob, fvg, ret, direction, current_price):
 
 
 def _build_reason(path_label, bias_label, direction_word, liquidity_source, confirm_event,
-                   entry_array_name, entry_zone, target_price, pd_zone, broken_level, stop_loss,
-                   break_age, displacement_strength, killzone_note):
+                   entry_array_name, entry_zone, target_price, pd_zone, pd_zone_higher, broken_level,
+                   stop_loss, break_age, killzone_note):
     return (
         f"Type: {path_label}\n"
         f"Bias: {direction_word} (on {bias_label})\n"
-        f"Premium/Discount: {pd_zone}\n"
+        f"Premium/Discount (zone frame): {pd_zone}\n"
+        f"Premium/Discount ({bias_label}, higher frame): {pd_zone_higher}\n"
         f"Liquidity target: {liquidity_source} @ {round(target_price, 2)}\n"
-        f"Trigger: {confirm_event} (displacement {displacement_strength}x std)\n"
+        f"Trigger: {confirm_event}\n"
         f"Timing: {killzone_note}\n"
         f"Entry array: {entry_array_name}\n"
         f"Entry zone: {round(entry_zone['bottom'], 2)} - {round(entry_zone['top'], 2)}\n"
@@ -238,16 +206,25 @@ def _process_path(bias_df, bias_label, zone_df, entry_df, path_label, daily_df=N
     if direction_word is None:
         return None, f"{path_label}: skipped - no BOS/CHoCH bias found"
 
-    pd_zone = _premium_discount_zone(zone_df)
-    wanted_zone = "discount" if direction_word == "bullish" else "premium"
-    if pd_zone != wanted_zone:
-        return None, f"{path_label}: skipped - price in {pd_zone} zone, need {wanted_zone}"
-
     sw, bc, liq, ob, fvg, ret = _analyze_zone(zone_df)
 
-    trigger = _find_trigger(zone_df, bc, liq, direction_word, CONFIRM_MAX_WAIT)
+    wanted_zone = "discount" if direction_word == "bullish" else "premium"
+
+    pd_zone = _premium_discount_from_swing(zone_df, sw)
+    if pd_zone is None:
+        return None, f"{path_label}: skipped - not enough swing data for premium/discount (zone frame)"
+    if pd_zone != wanted_zone:
+        return None, f"{path_label}: skipped - price in {pd_zone} zone (zone frame), need {wanted_zone}"
+
+    pd_zone_higher = _premium_discount_from_swing(bias_df, sw_bias)
+    if pd_zone_higher is None:
+        return None, f"{path_label}: skipped - not enough swing data for premium/discount ({bias_label})"
+    if pd_zone_higher != wanted_zone:
+        return None, f"{path_label}: skipped - price in {pd_zone_higher} zone ({bias_label}), need {wanted_zone}"
+
+    trigger = _find_trigger(bc, liq, direction_word, CONFIRM_MAX_WAIT)
     if trigger is None:
-        return None, f"{path_label}: skipped - no trigger with sufficient displacement"
+        return None, f"{path_label}: skipped - no matching BOS/CHoCH trigger on zone timeframe"
 
     bias_current_price = float(bias_df["close"].iloc[-1])
     liquidity_price, liquidity_source = _liquidity_target(
@@ -293,8 +270,8 @@ def _process_path(bias_df, bias_label, zone_df, entry_df, path_label, daily_df=N
 
     reason = _build_reason(
         path_label, bias_label, direction_word, liquidity_source, trigger["event"],
-        entry_array_name, entry_zone, take_profit, pd_zone, bias_level, stop_loss,
-        break_age, trigger["displacement_strength"], killzone_note,
+        entry_array_name, entry_zone, take_profit, pd_zone, pd_zone_higher, bias_level,
+        stop_loss, break_age, killzone_note,
     )
 
     signal = {
