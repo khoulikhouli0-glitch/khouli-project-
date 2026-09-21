@@ -6,7 +6,7 @@ import websockets
 
 from config import Config
 
-DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id={app_id}"
+DERIV_WS_URL = "wss://ws.binaryws.com/websockets/v3?app_id={app_id}"
 
 TIMEFRAME_SECONDS = {
     "M1": 60,
