@@ -21,16 +21,30 @@ SYMBOL_MAP = {
     "XAUUSD": "frxXAUUSD",
 }
 
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 5
+
 
 async def _request(payload: dict) -> dict:
     url = DERIV_WS_URL.format(app_id=Config.DERIV_APP_ID)
-    async with websockets.connect(url) as ws:
-        if Config.DERIV_API_TOKEN:
-            await ws.send(json.dumps({"authorize": Config.DERIV_API_TOKEN}))
-            await ws.recv()
-        await ws.send(json.dumps(payload))
-        response = await ws.recv()
-        return json.loads(response)
+    last_error = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            async with websockets.connect(url) as ws:
+                if Config.DERIV_API_TOKEN:
+                    await ws.send(json.dumps({"authorize": Config.DERIV_API_TOKEN}))
+                    await ws.recv()
+                await ws.send(json.dumps(payload))
+                response = await ws.recv()
+                return json.loads(response)
+        except Exception as e:
+            last_error = e
+            print(f"[Deriv] Connection attempt {attempt}/{MAX_RETRIES} failed: {e}")
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+
+    raise last_error
 
 
 def connect() -> bool:
