@@ -24,6 +24,11 @@ SYMBOL_MAP = {
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 5
 
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Origin": "https://app.deriv.com",
+}
+
 
 async def _request(payload: dict) -> dict:
     url = DERIV_WS_URL.format(app_id=Config.DERIV_APP_ID)
@@ -31,7 +36,7 @@ async def _request(payload: dict) -> dict:
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with websockets.connect(url) as ws:
+            async with websockets.connect(url, extra_headers=BROWSER_HEADERS) as ws:
                 if Config.DERIV_API_TOKEN:
                     await ws.send(json.dumps({"authorize": Config.DERIV_API_TOKEN}))
                     await ws.recv()
